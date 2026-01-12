@@ -1,0 +1,6 @@
+name,number,email,password,assigned_course,user_type
+John Doe,1234567890,john.doe@example.com,password123,course-123,student
+Jane Smith,9876543210,jane.smith@example.com,password456,course-456,teacher
+Bob Johnson,5551234567,bob.johnson@example.com,password789,"course-123,course-456",admin
+Alice Brown,1112223333,alice.brown@example.com,passwordabc,,student
+Charlie Wilson,4445556666,charlie.wilson@example.com,passwordxyz,course-789,teacher
