@@ -1179,15 +1179,16 @@ export class InterviewPrepService {
     if (questionsList.length > 0) {
       for (let i = 0; i < questionsList.length; i++) {
         const question = questionsList[i];
-        await this.processQuestion(
-          exerciseId,
-          datasetId,
-          question,
-          subject,
-          startQuestionNumber + i,
-          result,
-          subjectData,
-        );
+      await this.processQuestion(
+        exerciseId,
+        datasetId,
+        question,
+        subject,
+        startQuestionNumber + i,
+        result,
+        subjectData,
+        caseStudy,
+      );
       }
     }
   }
@@ -1200,6 +1201,7 @@ export class InterviewPrepService {
     questionNumber: number,
     result: MigrationResult,
     subjectData: any,
+    caseStudy?: any,
   ): Promise<void> {
     // Create question
     const questionBusinessContext =
@@ -1217,6 +1219,24 @@ export class InterviewPrepService {
       question.dataset_description ||
       subjectData?.dataset_description ||
       subjectData?.dataset_overview ||
+      null;
+
+    const caseStudyMeta = caseStudy ?? {};
+    const contentTitle =
+      question.title ??
+      question.case_study_title ??
+      caseStudyMeta.title ??
+      null;
+    const contentProblemStatement =
+      question.problem_statement ??
+      question.case_study_problem_statement ??
+      caseStudyMeta.problem_statement ??
+      question.question ??
+      null;
+    const contentDescription =
+      question.description ??
+      question.case_study_description ??
+      caseStudyMeta.description ??
       null;
 
     const questionData = {
@@ -1237,6 +1257,17 @@ export class InterviewPrepService {
         business_context: questionBusinessContext,
         dataset_context: questionDatasetContext,
         dataset_description: questionDatasetDescription,
+        title: contentTitle,
+        problem_statement: contentProblemStatement,
+        description: contentDescription,
+        case_study_title:
+          question.case_study_title ?? caseStudyMeta.title ?? null,
+        case_study_description:
+          question.case_study_description ?? caseStudyMeta.description ?? null,
+        case_study_problem_statement:
+          question.case_study_problem_statement ??
+          caseStudyMeta.problem_statement ??
+          null,
       },
       expected_output_table: question.sample_output
         ? [question.sample_output]
@@ -1577,6 +1608,9 @@ export class InterviewPrepService {
         content: {
           question: questionText,
           hint: caseStudy.solution_outline,
+          title: caseStudy.title || null,
+          problem_statement: caseStudy.problem_statement || null,
+          description: caseStudy.description || null,
           business_context:
             caseStudy.business_problem || subjectData?.business_context,
           dataset_context:
