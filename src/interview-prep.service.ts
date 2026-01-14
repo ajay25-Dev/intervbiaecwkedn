@@ -330,7 +330,7 @@ export class InterviewPrepService {
 
       // Call AI service to generate base plan
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 120000);
+      const timeoutId = setTimeout(() => controller.abort(), 220000);
 
       const basePlanResponse = await fetch(
         `${this.aiServiceUrl}/interview/generate-plan`,
@@ -362,7 +362,7 @@ export class InterviewPrepService {
           const subjectController = new AbortController();
           const subjectTimeoutId = setTimeout(
             () => subjectController.abort(),
-            120000,
+            220000,
           );
 
           try {
@@ -406,6 +406,11 @@ export class InterviewPrepService {
             continue;
           }
 
+          const solutionCodingLanguage = this.resolveSolutionCodingLanguage(
+            subject,
+            mappedLanguage,
+          );
+
           const subjectResponse = await fetch(`${this.aiServiceUrl}/generate`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -419,7 +424,7 @@ export class InterviewPrepService {
                 future_topics: [],
                 learner_level: this.mapDifficultyToLevel(learnerDifficulty),
                 coding_language: mappedLanguage,
-                solution_coding_language: mappedLanguage,
+              solution_coding_language: solutionCodingLanguage,
                 dataset_creation_coding_language: datasetLanguage,
                 verify_locally: false,
               }),
@@ -893,6 +898,35 @@ export class InterviewPrepService {
       'Domain Knowledge': 'Text',
     };
     return mapping[subject] || 'SQL';
+  }
+
+  private resolveSolutionCodingLanguage(
+    subject: string,
+    fallback?: string,
+  ): string {
+    const normalized = (subject || '').trim().toLowerCase();
+    if (
+      normalized === 'google_sheets' ||
+      normalized === 'google sheet' ||
+      normalized === 'google sheets' ||
+      normalized === 'sheets' ||
+      normalized === 'sheet' ||
+      normalized === 'statistics' ||
+      normalized === 'statistic'
+    ) {
+      return 'excel formula';
+    }
+    if (normalized === 'python') {
+      return 'python';
+    }
+    if (normalized === 'sql') {
+      return 'sql';
+    }
+    return (
+      fallback?.trim() ||
+      this.mapSubjectToLanguage(subject) ||
+      'SQL'
+    );
   }
 
   private resolveLearnerDifficulty(
