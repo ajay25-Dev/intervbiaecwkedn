@@ -161,6 +161,12 @@ export class InterviewPlanResponse {
 export class ExtractJDDto {
   job_description: string;
   company_name?: string;
+  @IsNumber()
+  @IsOptional()
+  jd_id?: number;
+  @IsEnum(IndustryType)
+  @IsOptional()
+  industry?: IndustryType;
 }
 
 export class ExtractJDResponse {
@@ -254,6 +260,10 @@ export class GeneratePracticeExercisesDto {
   @IsString({ each: true })
   @IsOptional()
   future_topics?: string[];
+
+  @IsNumber()
+  @IsOptional()
+  plan_id?: number;
 }
 
 export class PracticeQuestion {
@@ -279,6 +289,7 @@ export class PracticeExerciseResponse {
   data_creation_python?: string;
   dataset_csv?: string;
   created_at?: string;
+  plan_subject_data?: Record<string, unknown>;
 }
 
 export class MigratePlanDataDto {

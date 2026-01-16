@@ -424,7 +424,7 @@ export class InterviewPrepService {
                 future_topics: [],
                 learner_level: this.mapDifficultyToLevel(learnerDifficulty),
                 coding_language: mappedLanguage,
-              solution_coding_language: solutionCodingLanguage,
+                solution_coding_language: solutionCodingLanguage,
                 dataset_creation_coding_language: datasetLanguage,
                 verify_locally: false,
               }),
@@ -514,21 +514,42 @@ export class InterviewPrepService {
     }
   }
 
+  
+
   async getInterviewPlan(planId: number, userId: string) {
+    console.log('[getInterviewPlan] planId=%s userId=%s', planId, userId);
     try {
       const { data, error } = await this.supabase
         .from('interview_prep_plans')
-        .select()
+        .select('*')
         .eq('id', planId)
         .eq('user_id', userId)
         .single();
 
       if (error && error.code !== 'PGRST116') throw error;
-      if (!data) throw new NotFoundException('Plan not found');
+      if (!data) {
+        throw new NotFoundException('Plan not found');
+      }
+
+      if (data?.jd_id) {
+        const { data: jdData, error: jdError } = await this.supabase
+          .from('interview_job_descriptions')
+          .select('company_name, role_title, industry')
+          .eq('id', data.jd_id)
+          .maybeSingle();
+        if (jdError && jdError.code !== 'PGRST116') {
+          console.warn('[getInterviewPlan] missing job_description', jdError);
+        } else if (jdData) {
+          (data as any).job_description = jdData;
+        }
+      }
 
       return data;
     } catch (error) {
-      throw new BadRequestException(`Failed to fetch plan: ${error.message}`);
+      console.error('[getInterviewPlan] failed', error);
+      throw new BadRequestException(
+        `Failed to fetch plan: ${error?.message || error}`,
+      );
     }
   }
 
@@ -536,7 +557,9 @@ export class InterviewPrepService {
     try {
       let query = this.supabase
         .from('interview_prep_plans')
-        .select()
+        .select(
+          '*, job_description:interview_job_descriptions(company_name, role_title, industry)',
+        )
         .eq('user_id', userId)
         .order('created_at', { ascending: false })
         .limit(1);
@@ -571,7 +594,10 @@ export class InterviewPrepService {
     }
   }
 
-  async extractJDInfo(dto: ExtractJDDto): Promise<ExtractJDResponse> {
+  async extractJDInfo(
+    dto: ExtractJDDto,
+    userId?: string,
+  ): Promise<ExtractJDResponse> {
     try {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 30000);
@@ -608,7 +634,9 @@ export class InterviewPrepService {
       }
 
       try {
-        return JSON.parse(responseText) as ExtractJDResponse;
+        const parsedResponse = JSON.parse(responseText) as ExtractJDResponse;
+        await this.persistJDMetadataOnExtraction(dto, userId, parsedResponse);
+        return parsedResponse;
       } catch (parseError) {
         throw new Error(
           `AI service returned invalid JSON: ${responseText || 'empty body'}`,
@@ -618,6 +646,50 @@ export class InterviewPrepService {
       console.error('[extractJDInfo] Error:', error);
       throw new BadRequestException(
         `Failed to extract JD info: ${error.message}`,
+      );
+    }
+  }
+
+  private async persistJDMetadataOnExtraction(
+    dto: ExtractJDDto,
+    userId: string | undefined,
+    extracted: ExtractJDResponse,
+  ): Promise<void> {
+    if (!dto.jd_id) return;
+
+    const updates: Record<string, unknown> = {};
+    if (dto.company_name?.trim()) {
+      updates.company_name = dto.company_name.trim();
+    }
+    if (extracted.role_title) {
+      updates.role_title = extracted.role_title;
+    }
+    const industryValue =
+      dto.industry ||
+      (Array.isArray(extracted.domains) && extracted.domains[0]);
+    if (industryValue) {
+      updates.industry = industryValue;
+    }
+
+    if (!Object.keys(updates).length) {
+      return;
+    }
+
+    updates.updated_at = new Date().toISOString();
+
+    let query = this.supabase
+      .from('interview_job_descriptions')
+      .update(updates)
+      .eq('id', dto.jd_id);
+    if (userId) {
+      query = query.eq('user_id', userId);
+    }
+
+    const { error } = await query;
+    if (error) {
+      console.error(
+        '[persistJDMetadataOnExtraction] Failed to update JD metadata:',
+        error,
       );
     }
   }
@@ -689,6 +761,7 @@ export class InterviewPrepService {
         topic,
         topic_hierarchy,
         future_topics,
+        plan_id,
       } = dto;
 
       // Verify profile exists and belongs to user
@@ -708,6 +781,8 @@ export class InterviewPrepService {
 
       // Generate practice exercises for each subject
       const exercisesResults: PracticeExerciseResponse[] = [];
+      const accumulatedPlanSubjectData: Record<string, Record<string, unknown>> =
+        {};
 
       const subjectsToGenerate =
         subjects && subjects.length > 0
@@ -738,17 +813,19 @@ export class InterviewPrepService {
           );
 
           // Store in database
+          const exercisePayload = {
+            id: uuidv4(),
+            user_id: userId,
+            profile_id,
+            jd_id,
+            subject,
+            exercise_content: exerciseData,
+            created_at: new Date().toISOString(),
+          };
           const { data: storedExercise, error: storeError } =
             await this.supabase
               .from('interview_practice_exercises')
-              .insert({
-                user_id: userId,
-                profile_id,
-                jd_id,
-                subject,
-                exercise_content: exerciseData,
-                created_at: new Date().toISOString(),
-              })
+              .insert(exercisePayload)
               .select();
 
           if (storeError) {
@@ -771,8 +848,46 @@ export class InterviewPrepService {
             dataset_csv: exerciseData.dataset_csv_raw,
             created_at: storedExercise?.[0]?.created_at,
           });
+          if (plan_id) {
+            const planData =
+              exerciseData.plan_subject_data &&
+              typeof exerciseData.plan_subject_data === 'object'
+                ? { ...exerciseData.plan_subject_data }
+                : {};
+            planData.subject = subject;
+            accumulatedPlanSubjectData[subject] = planData;
+          }
         } catch (error) {
           console.error(`Error generating exercise for ${subject}:`, error);
+        }
+      }
+
+      if (
+        plan_id &&
+        Object.keys(accumulatedPlanSubjectData).length > 0
+      ) {
+        try {
+          await this.upsertPlanSubjectPrep(
+            userId,
+            plan_id,
+            accumulatedPlanSubjectData,
+          );
+          try {
+            await this.migratePlanDataToTables(userId, {
+              plan_id,
+              overwrite_existing: false,
+            });
+          } catch (migrationError) {
+            console.error(
+              `[generatePracticeExercises] Migration failed for plan ${plan_id}:`,
+              migrationError,
+            );
+          }
+        } catch (error) {
+          console.error(
+            `[generatePracticeExercises] Failed to append subject prep to plan ${plan_id}:`,
+            error,
+          );
         }
       }
 
@@ -780,6 +895,96 @@ export class InterviewPrepService {
     } catch (error) {
       throw new BadRequestException(
         `Failed to generate practice exercises: ${error.message}`,
+      );
+    }
+  }
+
+  private async upsertPlanSubjectPrep(
+    userId: string,
+    planId: number,
+    subjects: Record<string, Record<string, unknown>>,
+  ): Promise<void> {
+    if (!planId) {
+      return;
+    }
+    try {
+      const { data: plan, error: planError } = await this.supabase
+        .from('interview_prep_plans')
+        .select('plan_content, domain_knowledge_text')
+        .eq('id', planId)
+        .eq('user_id', userId)
+        .maybeSingle();
+
+      if (planError) {
+        console.error(
+          `[upsertPlanSubjectPrep] Failed to load plan ${planId}:`,
+          planError,
+        );
+        return;
+      }
+
+      if (!plan) {
+        console.warn(
+          `[upsertPlanSubjectPrep] Plan ${planId} not found for user ${userId}`,
+        );
+        return;
+      }
+
+      const existingPlanContent = plan.plan_content || {};
+      const existingSubjectPrep =
+        (existingPlanContent.subject_prep as Record<string, Record<string, unknown>>) || {};
+      const nextSubjectPrep = { ...existingSubjectPrep };
+      let updatedDomainKnowledgeText: string | null | undefined =
+        plan.domain_knowledge_text;
+
+      for (const [subject, subjectData] of Object.entries(subjects)) {
+        nextSubjectPrep[subject] = {
+          ...(nextSubjectPrep[subject] || {}),
+          ...subjectData,
+        };
+        const domainText =
+          subjectData['domain_knowledge_text'] ||
+          subjectData['business_context'];
+        if (
+          subject.toLowerCase().includes('domain knowledge') &&
+          typeof domainText === 'string'
+        ) {
+          updatedDomainKnowledgeText = domainText;
+        }
+      }
+
+      const subjectsCovered = Array.from(
+        new Set([
+          ...(existingPlanContent.subjects_covered || []),
+          ...Object.keys(nextSubjectPrep),
+        ]),
+      );
+
+      const { error: updateError } = await this.supabase
+        .from('interview_prep_plans')
+        .update({
+          plan_content: {
+            ...existingPlanContent,
+            subject_prep: nextSubjectPrep,
+            subjects_covered: subjectsCovered,
+          },
+          ...(updatedDomainKnowledgeText
+            ? { domain_knowledge_text: updatedDomainKnowledgeText }
+            : {}),
+        })
+        .eq('id', planId)
+        .eq('user_id', userId);
+
+      if (updateError) {
+        console.error(
+          `[upsertPlanSubjectPrep] Failed to update plan ${planId}:`,
+          updateError,
+        );
+      }
+    } catch (error) {
+      console.error(
+        `[upsertPlanSubjectPrep] Unexpected error updating plan ${planId}:`,
+        error,
       );
     }
   }
@@ -824,13 +1029,17 @@ export class InterviewPrepService {
       verify_locally: false,
     };
 
+    const timeoutMs = Number(process.env.AI_TIMEOUT_MS) || 120000;
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 60000);
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
     try {
-      const practiceApiUrl =
-        process.env.PRACTICE_EXERCISE_API_URL ||
-        'http://localhost:8000/generate-exercises';
+      const aiServiceHost =
+        process.env.AI_SERVICE_URL ||
+        process.env.BASE_AI_API_URL ||
+        process.env.NEXT_PUBLIC_AI_SERVICE_URL ||
+        'http://localhost:8000';
+      const practiceApiUrl = `${aiServiceHost.replace(/\/$/, '')}/generate`;
 
       const response = await fetch(practiceApiUrl, {
         method: 'POST',
@@ -849,6 +1058,11 @@ export class InterviewPrepService {
 
       const data = await response.json();
 
+      const planSubjectData = {
+        ...data,
+        subject,
+      };
+
       return {
         header_text: data.header_text || `${subject} Practice Exercises`,
         dataset_description: data.dataset_description || '',
@@ -865,6 +1079,7 @@ export class InterviewPrepService {
         data_creation_sql: data.data_creation_sql || '',
         data_creation_python: data.data_creation_python || '',
         dataset_csv_raw: data.dataset_csv_raw || '',
+        plan_subject_data: planSubjectData,
       };
     } catch (error) {
       clearTimeout(timeoutId);

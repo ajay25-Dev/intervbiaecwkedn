@@ -177,11 +177,12 @@ export class InterviewPrepController {
   }
 
   @Post('extract-jd')
-  async extractJDInfo(@Body() dto: ExtractJDDto) {
+  async extractJDInfo(@Request() req, @Body() dto: ExtractJDDto) {
     if (!dto.job_description) {
       throw new BadRequestException('Job description is required');
     }
-    return this.service.extractJDInfo(dto);
+    const userId = this.getUserId(req);
+    return this.service.extractJDInfo(dto, userId);
   }
 
   @Post('domain-kpi')
