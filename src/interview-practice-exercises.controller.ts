@@ -29,7 +29,7 @@ export class InterviewPracticeExercisesController {
     if (req?.headers?.['x-user-id']) return String(req.headers['x-user-id']);
     if (process.env.DEV_INTERVIEW_PREP_USER_ID)
       return process.env.DEV_INTERVIEW_PREP_USER_ID;
-    return '00000000-0000-0000-0000-000000000000';
+    return '550e8400-e29b-41d4-a716-446655440000';
   }
 
   @Get('practice-exercises')

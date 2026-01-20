@@ -161,6 +161,15 @@ export class InterviewPrepController {
     return this.service.getInterviewPlan(planId, userId);
   }
 
+  @Get('plan/:planId/progress')
+  async getPlanProgress(
+    @Request() req,
+    @Param('planId', ParseIntPipe) planId: number,
+  ) {
+    const userId = this.getUserId(req);
+    return this.service.getPlanProgress(userId, planId);
+  }
+
   @Get('plan/latest/:profileId')
   async getLatestPlan(
     @Request() req,

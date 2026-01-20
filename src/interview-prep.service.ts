@@ -374,10 +374,9 @@ export class InterviewPrepService {
             );
 
             const topicInfo = this.getPlanTopicInfo(subject);
-
-          const isProblemSolving = subject.trim().toLowerCase() === 'problem solving';
-          if (isProblemSolving) {
-            const subjectResponse = await fetch(`${this.aiServiceUrl}/interview/subject-prep`, {
+            const isProblemSolving = this.isProblemSolvingSubject(subject);
+            if (isProblemSolving) {
+              const subjectResponse = await fetch(`${this.aiServiceUrl}/interview/subject-prep`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
@@ -551,6 +550,418 @@ export class InterviewPrepService {
         `Failed to fetch plan: ${error?.message || error}`,
       );
     }
+  }
+
+  async getPlanProgress(userId: string, planId: number) {
+    try {
+      const { data: plan, error: planError } = await this.supabase
+        .from('interview_prep_plans')
+        .select('*')
+        .eq('id', planId)
+        .eq('user_id', userId)
+        .single();
+
+      if (planError || !plan) {
+        throw new NotFoundException('Plan not found');
+      }
+
+      const planLabel =
+        plan.plan_content?.summary ||
+        plan.plan_content?.title ||
+        plan.plan_content?.plan_title ||
+        `Plan ${planId}`;
+
+      const { data: exercisesData = [] } = await this.supabase
+        .from('interview_practice_exercises')
+        .select('id, name, created_at')
+        .ilike('name', `%Plan ${planId}%`)
+        .order('created_at', { ascending: true });
+
+      const exercises = (exercisesData || []) as {
+        id?: string;
+        name?: string;
+        created_at?: string;
+      }[];
+
+      const exerciseIds = exercises
+        .map((exercise) => exercise.id)
+        .filter(Boolean);
+
+      let questions: { id: string; exercise_id: string }[] = [];
+      if (exerciseIds.length > 0) {
+        const { data: questionData, error: questionError } = await this.supabase
+          .from('interview_practice_questions')
+          .select('id, exercise_id')
+          .in('exercise_id', exerciseIds);
+        if (questionError) {
+          throw new BadRequestException(
+            `Failed to fetch plan questions: ${questionError.message}`,
+          );
+        }
+        questions = questionData || [];
+      }
+
+      const questionIds = questions.map((question) => question.id).filter(Boolean);
+
+      let submissions: {
+        question_id: string;
+        score: number | null;
+        created_at: string | null;
+      }[] = [];
+      if (questionIds.length > 0) {
+        const { data: submissionData, error: submissionError } = await this.supabase
+          .from('interview_exercise_question_submissions')
+          .select('question_id, score, created_at')
+          .eq('student_id', userId)
+          .in('question_id', questionIds);
+
+        if (submissionError) {
+          throw new BadRequestException(
+            `Failed to fetch plan submissions: ${submissionError.message}`,
+          );
+        }
+
+        submissions = submissionData || [];
+      }
+
+      let mentorChatMap = new Map<
+        string,
+        { count: number; latest: string | null }
+      >();
+      if (questionIds.length > 0) {
+        const { data: chatData, error: chatError } = await this.supabase
+          .from('interview_exercise_mentor_chat')
+          .select('question_id, created_at')
+          .in('question_id', questionIds);
+
+        if (chatError) {
+          throw new BadRequestException(
+            `Failed to fetch mentor chat progress: ${chatError.message}`,
+          );
+        }
+        (chatData || []).forEach((chat) => {
+          if (!chat?.question_id) {
+            return;
+          }
+          const existing = mentorChatMap.get(chat.question_id);
+          const latest = this.getLatestTimestamp(
+            existing?.latest ?? null,
+            chat.created_at,
+          );
+          mentorChatMap.set(chat.question_id, {
+            count: (existing?.count ?? 0) + 1,
+            latest,
+          });
+        });
+      }
+
+      const submissionsByQuestion = new Map<string, typeof submissions[0][]>();
+      submissions.forEach((submission) => {
+        if (!submission?.question_id) {
+          return;
+        }
+        const existing = submissionsByQuestion.get(submission.question_id) || [];
+        existing.push(submission);
+        submissionsByQuestion.set(submission.question_id, existing);
+      });
+
+      const questionsByExercise = new Map<string, string[]>();
+      questions.forEach((question) => {
+        if (!question?.exercise_id || !question.id) {
+          return;
+        }
+        const existing = questionsByExercise.get(question.exercise_id) || [];
+        existing.push(question.id);
+        questionsByExercise.set(question.exercise_id, existing);
+      });
+
+      type SubjectAccumulator = {
+        subject: string;
+        primaryExerciseId?: string;
+        questionCount: number;
+        completedQuestions: number;
+        correctQuestions: number;
+        attemptedQuestions: number;
+        submissionAttempts: number;
+        latestSubmissionAt: string | null;
+      };
+
+      const accumulator = new Map<string, SubjectAccumulator>();
+
+      const addToAccumulator = (
+        subjectLabel: string,
+        values: Partial<SubjectAccumulator>,
+      ) => {
+        const existing = accumulator.get(subjectLabel);
+        if (subjectLabel.trim().toLowerCase() === 'domain knowledge') {
+          return;
+        }
+        if (existing) {
+          existing.questionCount += values.questionCount ?? 0;
+          existing.completedQuestions += values.completedQuestions ?? 0;
+          existing.correctQuestions += values.correctQuestions ?? 0;
+          existing.attemptedQuestions += values.attemptedQuestions ?? 0;
+          existing.submissionAttempts += values.submissionAttempts ?? 0;
+          existing.latestSubmissionAt = this.getLatestTimestamp(
+            existing.latestSubmissionAt,
+            values.latestSubmissionAt,
+          );
+          if (!existing.primaryExerciseId && values.primaryExerciseId) {
+            existing.primaryExerciseId = values.primaryExerciseId;
+          }
+          return;
+        }
+        accumulator.set(subjectLabel, {
+          subject: subjectLabel,
+          primaryExerciseId: values.primaryExerciseId,
+          questionCount: values.questionCount ?? 0,
+          completedQuestions: values.completedQuestions ?? 0,
+          correctQuestions: values.correctQuestions ?? 0,
+          attemptedQuestions: values.attemptedQuestions ?? 0,
+          submissionAttempts: values.submissionAttempts ?? 0,
+          latestSubmissionAt: values.latestSubmissionAt ?? null,
+        });
+      };
+
+      const planSubjectNames = this.collectPlanSubjectNames(plan);
+
+      exercises.forEach((exercise) => {
+        if (!exercise?.id) {
+          return;
+        }
+        const questionIdsForExercise = questionsByExercise.get(exercise.id) || [];
+        const subjectLabel = this.formatExerciseSubjectLabel(exercise.name, planId);
+        const isProblemSolvingExercise = subjectLabel
+          .toLowerCase()
+          .includes('problem solving');
+        const exerciseStats = questionIdsForExercise.reduce(
+          (acc, questionId) => {
+            const questionSubs = submissionsByQuestion.get(questionId) || [];
+            if (questionSubs.length > 0) {
+              acc.attempted += 1;
+              acc.submissionAttempts += 1;
+              acc.completed += 1;
+              const bestScore = questionSubs.reduce((max, sub) => {
+                const value =
+                  typeof sub.score === 'number' ? sub.score : Number(sub.score) || 0;
+                return Math.max(max, value);
+              }, 0);
+              if (bestScore > 0) {
+                acc.correct += 1;
+              }
+              const latestForQuestion = questionSubs.reduce(
+                (latest, entry) =>
+                  this.getLatestTimestamp(latest, entry.created_at),
+                null as string | null,
+              );
+              acc.latest = this.getLatestTimestamp(acc.latest, latestForQuestion);
+            } else if (isProblemSolvingExercise) {
+              const chatInfo = mentorChatMap.get(questionId);
+              if (chatInfo) {
+                acc.attempted += 1;
+                if (chatInfo.count >= 7) {
+                  acc.completed += 1;
+                  acc.latest = this.getLatestTimestamp(acc.latest, chatInfo.latest);
+                }
+              }
+            }
+            acc.total += 1;
+            return acc;
+          },
+          {
+            total: 0,
+            completed: 0,
+            correct: 0,
+            attempted: 0,
+            submissionAttempts: 0,
+            latest: null as string | null,
+          },
+        );
+
+        addToAccumulator(subjectLabel, {
+          questionCount: exerciseStats.total,
+          completedQuestions: exerciseStats.completed,
+          correctQuestions: exerciseStats.correct,
+          latestSubmissionAt: exerciseStats.latest,
+          primaryExerciseId: exercise.id,
+          attemptedQuestions: exerciseStats.attempted,
+          submissionAttempts: exerciseStats.submissionAttempts,
+        });
+        if (!planSubjectNames.includes(subjectLabel)) {
+          planSubjectNames.push(subjectLabel);
+        }
+      });
+
+      planSubjectNames.forEach((subjectName) => {
+        if (!accumulator.has(subjectName)) {
+          accumulator.set(subjectName, {
+            subject: subjectName,
+            questionCount: 0,
+            completedQuestions: 0,
+            correctQuestions: 0,
+            attemptedQuestions: 0,
+            submissionAttempts: 0,
+            latestSubmissionAt: null,
+          });
+        }
+      });
+
+      const subjects = Array.from(accumulator.values()).map((summary) => {
+        const completionPercentage =
+          summary.questionCount > 0
+            ? Number(
+                (
+                  (summary.completedQuestions / summary.questionCount) *
+                  100
+                ).toFixed(1),
+              )
+            : 0;
+        const accuracyPercentage =
+          summary.questionCount > 0
+            ? Number(
+                (
+                  (summary.correctQuestions / summary.questionCount) *
+                  100
+                ).toFixed(1),
+              )
+            : 0;
+        const attempted = summary.attemptedQuestions;
+        const wrongCount = Math.max(
+          summary.submissionAttempts - summary.correctQuestions,
+          0,
+        );
+        const notAttempted = Math.max(summary.questionCount - attempted, 0);
+        const inProgressQuestions = Math.max(attempted - summary.completedQuestions, 0);
+        return {
+          subject: summary.subject,
+          exerciseId: summary.primaryExerciseId,
+          questionCount: summary.questionCount,
+          completedQuestions: summary.completedQuestions,
+          correctQuestions: summary.correctQuestions,
+          completionPercentage,
+          accuracyPercentage,
+          attemptedQuestions: attempted,
+          wrongQuestions: wrongCount,
+          notAttemptedQuestions: notAttempted,
+          inProgressQuestions,
+          latestSubmissionAt: summary.latestSubmissionAt,
+        };
+      });
+
+      const totalQuestions = subjects.reduce(
+        (total, subject) => total + subject.questionCount,
+        0,
+      );
+      const completedQuestions = subjects.reduce(
+        (total, subject) => total + subject.completedQuestions,
+        0,
+      );
+      const correctQuestions = subjects.reduce(
+        (total, subject) => total + subject.correctQuestions,
+        0,
+      );
+      const completionPercentage =
+        totalQuestions > 0
+          ? Number(((completedQuestions / totalQuestions) * 100).toFixed(1))
+          : 0;
+      const finalScore =
+        totalQuestions > 0
+          ? Number(((correctQuestions / totalQuestions) * 100).toFixed(1))
+          : 0;
+      const lastActivityAt = subjects.reduce(
+        (latest, subject) =>
+          this.getLatestTimestamp(latest, subject.latestSubmissionAt),
+        null as string | null,
+      );
+
+      return {
+        plan_id: planId,
+        plan_name: planLabel,
+        stats: {
+          totalQuestions,
+          completedQuestions,
+          correctQuestions,
+          completionPercentage,
+          finalScore,
+          lastActivityAt,
+        },
+        subjects,
+      };
+    } catch (error) {
+      console.error('[getPlanProgress] failed', error);
+      throw new BadRequestException(
+        `Failed to fetch plan progress: ${error?.message || error}`,
+      );
+    }
+  }
+
+  private formatExerciseSubjectLabel(
+    value: string | null | undefined,
+    planId: number,
+  ): string {
+    const raw = value?.toString().trim() || '';
+    if (!raw) {
+      return `Plan ${planId}`;
+    }
+    const pattern = new RegExp(`\\s*-\\s*Plan\\s+${planId}\\s*$`, 'i');
+    const cleaned = raw.replace(pattern, '').trim();
+    return cleaned || raw;
+  }
+
+  private collectPlanSubjectNames(plan: any): string[] {
+    const subjects = new Set<string>();
+    const addSubject = (value?: string) => {
+      const normalized = this.normalizePlanSubjectName(value);
+      const lower = normalized.toLowerCase();
+      if (!normalized || lower === 'domain knowledge') {
+        return;
+      }
+      if (normalized) {
+        subjects.add(normalized);
+      }
+    };
+
+    const covered = plan?.plan_content?.subjects_covered;
+    if (Array.isArray(covered)) {
+      covered.forEach((subject) => addSubject(subject));
+    }
+
+    const prep = (plan?.plan_content?.subject_prep ||
+      {}) as Record<string, any>;
+    Object.entries(prep).forEach(([key, value]) => {
+    const entry = value as Record<string, any>;
+      const subjectValue =
+        typeof entry?.subject === 'string' ? entry.subject : key;
+      addSubject(subjectValue);
+    });
+
+    const result = Array.from(subjects);
+    return result.length > 0 ? result : ['General'];
+  }
+
+  private normalizePlanSubjectName(value?: string): string {
+    return value?.toString().trim() || '';
+  }
+
+  private getLatestTimestamp(
+    current: string | null | undefined,
+    candidate: string | null | undefined,
+  ): string | null {
+    if (!current) {
+      return candidate ?? null;
+    }
+    if (!candidate) {
+      return current;
+    }
+    const currentTime = Date.parse(current);
+    const candidateTime = Date.parse(candidate);
+    if (Number.isNaN(candidateTime)) {
+      return current;
+    }
+    if (Number.isNaN(currentTime)) {
+      return candidate;
+    }
+    return candidateTime > currentTime ? candidate : current;
   }
 
   async getLatestPlan(userId: string, profileId?: number) {
@@ -989,6 +1400,15 @@ export class InterviewPrepService {
     }
   }
 
+  private isProblemSolvingSubject(subject: string): boolean {
+    const normalized = (subject || '').trim().toLowerCase();
+    return (
+      normalized === 'problem solving' ||
+      normalized === 'art of problem solving' ||
+      normalized === 'aops'
+    );
+  }
+
   private async generateSingleSubjectExercise(
     subject: string,
     profileData: any,
@@ -1015,6 +1435,73 @@ export class InterviewPrepService {
       overrides.learnerLevel,
       profileData.experience_level,
     );
+    if (this.isProblemSolvingSubject(subject)) {
+      const controller = new AbortController();
+      const timeoutMs =
+        Number(process.env.AI_TIMEOUT_MS) ||
+        Number(process.env.AI_TIMEOUT) ||
+        120000;
+      const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const response = await fetch(`${this.aiServiceUrl}/interview/subject-prep`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            subject,
+            job_description: jdData?.job_description,
+            experience_level: profileData?.experience_level,
+            company_name: profileData?.company_name,
+          }),
+          signal: controller.signal,
+        });
+        clearTimeout(timeoutId);
+        if (!response.ok) {
+          throw new Error(
+            `Practice exercise AI returned ${response.status}: ${response.statusText}`,
+          );
+        }
+        const data = await response.json();
+        const caseStudies = Array.isArray(data.case_studies)
+          ? data.case_studies
+          : [];
+        const primaryCaseStudy = caseStudies[0] || {};
+        const questionsRaw = Array.isArray(primaryCaseStudy.questions)
+          ? primaryCaseStudy.questions
+          : [];
+        return {
+          header_text:
+            primaryCaseStudy?.title ||
+            data?.header_text ||
+            `${subject} Case Study`,
+          dataset_description:
+            primaryCaseStudy?.description || data?.business_context || '',
+          questions: questionsRaw.map((question: any, idx: number) => ({
+            id: String(question.question_number || idx),
+            subject,
+            text:
+              question.business_question ||
+              question.question ||
+              question.prompt ||
+              `Question ${idx + 1}`,
+            difficulty: question.difficulty || 'Medium',
+            topics: question.topics || [subject],
+            hint: question.expected_approach || '',
+            expected_answer: '',
+            adaptive_note: question.adaptive_note || '',
+          })),
+          data_creation_sql: '',
+          data_creation_python: '',
+          dataset_csv_raw: '',
+          plan_subject_data: {
+            subject,
+            ...data,
+          },
+        };
+      } catch (error) {
+        clearTimeout(timeoutId);
+        throw error;
+      }
+    }
     const payload = {
       field: 'Data Analytics',
       domain: resolvedDomain,
@@ -1496,7 +1983,7 @@ export class InterviewPrepService {
       type: this.getQuestionTypeFromSubject(subject),
       language: this.getLanguageFromSubject(subject),
       difficulty: this.normalizeDifficultyValue(question.difficulty),
-      topics: [subject],
+      topics: this.resolveQuestionTopics(question, subject),
       points: 10,
       content: {
         question: question.question,
@@ -1562,6 +2049,52 @@ export class InterviewPrepService {
         result.answers_created++;
       }
     }
+  }
+
+  private resolveQuestionTopics(question: any, subject: string): string[] {
+    const candidates = [
+      question?.topics,
+      question?.topic,
+      question?.topic_hierarchy,
+    ];
+
+    for (const value of candidates) {
+      const normalized = this.normalizeTopics(value);
+      if (normalized.length > 0) {
+        return normalized;
+      }
+    }
+
+    if (subject) {
+      return [subject];
+    }
+
+    return [];
+  }
+
+  private normalizeTopics(value: unknown): string[] {
+    if (Array.isArray(value)) {
+      return value
+        .map((item) => (item ?? '').toString().trim())
+        .filter((item) => item.length > 0);
+    }
+
+    if (typeof value === 'string') {
+      const splitTopics = value
+        .split(/[,;/\n]+/)
+        .map((item) => item.trim())
+        .filter((item) => item.length > 0);
+      if (splitTopics.length > 0) {
+        return splitTopics;
+      }
+
+      const trimmed = value.trim();
+      if (trimmed.length > 0) {
+        return [trimmed];
+      }
+    }
+
+    return [];
   }
 
   private async deleteExerciseRelatedData(
