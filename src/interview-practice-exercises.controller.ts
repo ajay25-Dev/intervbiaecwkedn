@@ -10,12 +10,16 @@ import {
   NotFoundException,
   InternalServerErrorException,
   HttpException,
+  UseGuards,
+  UnauthorizedException,
 } from '@nestjs/common';
 import { InterviewPracticeExercisesService } from './interview-practice-exercises.service';
 import { PracticeCodingService } from './practice-coding.service';
 import { PracticeExercisesGenerationService } from './practice-exercises-generation.service';
+import { SupabaseGuard } from './auth/supabase.guard';
 
 @Controller('interview-prep')
+@UseGuards(SupabaseGuard)
 export class InterviewPracticeExercisesController {
   constructor(
     private readonly exercisesService: InterviewPracticeExercisesService,
@@ -24,12 +28,11 @@ export class InterviewPracticeExercisesController {
   ) {}
 
   private getUserId(req: any): string {
-    if (req?.user?.id) return req.user.id;
-    if (req?.user?.sub) return req.user.sub;
-    if (req?.headers?.['x-user-id']) return String(req.headers['x-user-id']);
-    if (process.env.DEV_INTERVIEW_PREP_USER_ID)
-      return process.env.DEV_INTERVIEW_PREP_USER_ID;
-    return '550e8400-e29b-41d4-a716-446655440000';
+    const userId = req?.user?.sub || req?.user?.id;
+    if (!userId || typeof userId !== 'string') {
+      throw new UnauthorizedException('User not authenticated');
+    }
+    return userId;
   }
 
   @Get('practice-exercises')

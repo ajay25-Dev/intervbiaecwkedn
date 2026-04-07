@@ -1683,8 +1683,7 @@ export class PracticeExercisesGenerationService {
             }
 
             const fileExtension = isPythonLike ? 'py' : 'sql';
-            const datasetLabel =
-              `Dataset for ${originalQuestion.business_question?.substring(0, 50) || 'Question'}`;
+            const datasetLabel = `Dataset for ${originalQuestion.business_question?.substring(0, 50) || 'Question'}`;
             const datasetTableName = sanitizeTableName(
               structuredTableName || datasetLabel,
               `dataset_${index + 1}`,
@@ -2763,7 +2762,8 @@ export class PracticeExercisesGenerationService {
       );
     }
 
-    const question = (questionData ?? null) as SectionExerciseQuestionRecord | null;
+    const question = (questionData ??
+      null) as SectionExerciseQuestionRecord | null;
     if (!question) {
       throw new InternalServerErrorException(
         `Question with ID ${questionId} not found.`,
@@ -3657,9 +3657,8 @@ export class PracticeExercisesGenerationService {
   }
 
   async getInterviewQuestionSubmissions(questionId: string, userId: string) {
-    
-  console.log(questionId);
-  console.log(userId);  
+    console.log(questionId);
+    console.log(userId);
 
     try {
       const { data: submissions, error } = await this.supabase
@@ -3676,13 +3675,12 @@ export class PracticeExercisesGenerationService {
           `Failed to fetch interview submissions: ${error.message}`,
         );
       }
-console.log(submissions);
+      console.log(submissions);
       return {
         submissions: submissions || [],
         total: (submissions || []).length,
         success: true,
       };
-
     } catch (error) {
       console.error('Error in getInterviewQuestionSubmissions:', error);
       throw new InternalServerErrorException(

@@ -26,7 +26,8 @@ export enum IndustryType {
 
 export class CreateInterviewProfileDto {
   @IsEmail()
-  email: string;
+  @IsOptional()
+  email?: string;
 
   @IsEnum(ExperienceLevel)
   experience_level: ExperienceLevel;
@@ -118,6 +119,53 @@ export class GenerateInterviewPlanDto {
   suggested_subjects?: string[];
 }
 
+export class GenerateInterviewQuestionsDto {
+  @IsString()
+  subject: string;
+
+  @IsString()
+  candidate_experience: string;
+
+  @IsString()
+  @IsOptional()
+  company_name?: string;
+
+  @IsString()
+  @IsOptional()
+  role?: string;
+
+  @IsString()
+  domain: string;
+
+  @IsNumber()
+  total_questions: number;
+}
+
+export class InterviewQuestionSampleDataMarkdown {
+  table1: string;
+  table2: string;
+}
+
+export class InterviewQuestionItem {
+  question_number: number;
+  stage: string;
+  title: string;
+  business_context: string;
+  problem_statement: string;
+  sample_data_markdown: InterviewQuestionSampleDataMarkdown;
+  output_columns_markdown: string;
+  expected_skills: string[];
+  difficulty: string;
+}
+
+export class GenerateInterviewQuestionsResponse {
+  subject: string;
+  company_name?: string;
+  role?: string;
+  total_questions: number;
+  questions: InterviewQuestionItem[];
+}
+
 export class KPI {
   name: string;
   description: string;
@@ -156,11 +204,14 @@ export class InterviewPlanResponse {
   domain_knowledge_text?: string | null;
   created_at?: string;
   updated_at?: string;
+  migration_result?: MigratePlanDataResponse;
 }
 
 export class ExtractJDDto {
   job_description: string;
   company_name?: string;
+  role?: string;
+  user_skills?: string;
   @IsNumber()
   @IsOptional()
   jd_id?: number;
@@ -176,6 +227,19 @@ export class ExtractJDResponse {
   suggested_subjects: string[];
   experience_level: string;
   key_responsibilities: string[];
+  interview_skill_summary?: {
+    company?: string;
+    role?: string;
+    core_technical_skills?: { skill: string; priority: number }[];
+    supporting_skills?: { skill: string; priority: number }[];
+    thinking_business_skills?: { skill: string; priority: number }[];
+    recommended_preparation_focus?: {
+      skill: string;
+      type: string;
+      reason: string;
+    }[];
+    notes?: string;
+  };
 }
 
 export class DomainKPIDto {

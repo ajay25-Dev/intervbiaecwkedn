@@ -7,9 +7,11 @@ import {
   Param,
   Request,
   BadRequestException,
+  UnauthorizedException,
   ParseIntPipe,
   UseInterceptors,
   UploadedFile,
+  UseGuards,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { diskStorage } from 'multer';
@@ -17,35 +19,60 @@ import { extname, join } from 'path';
 import { mkdirSync, existsSync } from 'fs';
 import { tmpdir } from 'os';
 import { InterviewPrepService } from './interview-prep.service';
+import { SupabaseGuard } from './auth/supabase.guard';
 import {
   CreateInterviewProfileDto,
   UpdateInterviewProfileDto,
   UploadJDDto,
   GenerateInterviewPlanDto,
+  GenerateInterviewQuestionsDto,
   ExtractJDDto,
   DomainKPIDto,
   GeneratePracticeExercisesDto,
   MigratePlanDataDto,
 } from './interview-prep.dto';
 
+type AuthenticatedRequest = {
+  user?: {
+    sub?: string;
+    id?: string;
+    email?: string;
+  };
+};
+
 @Controller('interview-prep')
+@UseGuards(SupabaseGuard)
 export class InterviewPrepController {
   constructor(private readonly service: InterviewPrepService) {}
 
-  private getUserId(req: any): string {
-    if (req?.user?.id) return req.user.id;
-    if (req?.user?.sub) return req.user.sub;
-    if (req?.headers?.['x-user-id']) return String(req.headers['x-user-id']);
-    if (process.env.DEV_INTERVIEW_PREP_USER_ID)
-      return process.env.DEV_INTERVIEW_PREP_USER_ID;
-    return '00000000-0000-0000-0000-000000000000';
+  private getUserId(req: AuthenticatedRequest): string {
+    const userId = req?.user?.sub || req?.user?.id;
+    if (!userId || typeof userId !== 'string') {
+      throw new UnauthorizedException('User not authenticated');
+    }
+    return userId;
+  }
+
+  private getAuthenticatedEmail(req: AuthenticatedRequest): string | undefined {
+    const email = req.user?.email;
+    return typeof email === 'string' && email.trim() ? email.trim() : undefined;
   }
 
   // Profile endpoints
   @Post('profile')
-  async createProfile(@Request() req, @Body() dto: CreateInterviewProfileDto) {
+  async createProfile(
+    @Request() req: AuthenticatedRequest,
+    @Body() dto: CreateInterviewProfileDto,
+  ) {
     const userId = this.getUserId(req);
-    return this.service.createOrUpdateProfile(userId, dto);
+    const email = dto.email || this.getAuthenticatedEmail(req);
+    if (!email) {
+      throw new BadRequestException('Authenticated email is required');
+    }
+    return this.service.createOrUpdateProfile(userId, {
+      ...dto,
+      email,
+    });
   }
 
   @Get('profile')
@@ -183,6 +210,15 @@ export class InterviewPrepController {
   async getLatestPlanDefault(@Request() req) {
     const userId = this.getUserId(req);
     return this.service.getLatestPlan(userId);
+  }
+
+  @Post('questions/generate')
+  async generateInterviewQuestions(
+    @Request() req,
+    @Body() dto: GenerateInterviewQuestionsDto,
+  ) {
+    const userId = this.getUserId(req);
+    return this.service.generateInterviewQuestions(userId, dto);
   }
 
   @Post('extract-jd')
