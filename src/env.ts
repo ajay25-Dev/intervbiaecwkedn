@@ -23,7 +23,7 @@ export function loadEnv() {
       if (!process.env[key]) process.env[key] = value;
     }
     // console.log('✅ Local .env file loaded successfully');
-  } catch (error) {
+  } catch {
     // console.log('ℹ️ No local .env file found, using environment variables');
 
     // In production environments like Railway, ensure required variables are set
@@ -45,14 +45,6 @@ export function loadEnv() {
         throw new Error(
           `Missing required environment variables: ${missingVars.join(', ')}`,
         );
-      }
-
-      // Set ALLOW_DEV_UNVERIFIED_JWT to 1 in production as fallback for JWT verification issues
-      if (!process.env.ALLOW_DEV_UNVERIFIED_JWT) {
-        process.env.ALLOW_DEV_UNVERIFIED_JWT = '1';
-        // console.log(
-        //   'ℹ️ Set ALLOW_DEV_UNVERIFIED_JWT=1 for production fallback',
-        // );
       }
     }
   }
