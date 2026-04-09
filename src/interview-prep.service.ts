@@ -30,6 +30,7 @@ type PracticeGenerationOverrides = {
   topic?: string;
   topicHierarchy?: string;
   futureTopics?: string[];
+  questionCount?: number;
 };
 import { FileExtractionService } from './file-extraction.service';
 
@@ -54,7 +55,7 @@ export class InterviewPrepService {
       topic: 'Probability Distributions',
       topicHierarchy: 'Summary Stats, Distributions, Hypothesis Testing',
     },
-    'Google Sheets': {
+    Excel: {
       topic: 'Spreadsheet formulas and analysis',
       topicHierarchy:
         'Formulas, Pivot tables, Lookups, Data cleaning, Analysis',
@@ -305,6 +306,176 @@ export class InterviewPrepService {
     );
   }
 
+  private getSubjectPrepTimeoutMs(subject: string, fallbackMs: number): number {
+    const normalized = this.normalizeSubjectKey(subject);
+    if (
+      normalized === 'excel' ||
+      normalized === 'statistics' ||
+      normalized === 'python' ||
+      normalized === 'power bi' ||
+      normalized === 'domain knowledge'
+    ) {
+      return Math.max(fallbackMs, 300000);
+    }
+    if (normalized === 'problem solving') {
+      return Math.max(fallbackMs, 240000);
+    }
+    return fallbackMs;
+  }
+
+  private createSubjectPrepStatus(
+    subject: string,
+    status: 'in_progress' | 'ready' | 'failed',
+    details: Record<string, unknown> = {},
+  ): Record<string, unknown> {
+    return {
+      subject,
+      generation_status: status,
+      generation_updated_at: new Date().toISOString(),
+      ...details,
+    };
+  }
+
+  private async setPlanSubjectPrepStatus(
+    userId: string,
+    planId: number,
+    subject: string,
+    status: 'in_progress' | 'ready' | 'failed',
+    details: Record<string, unknown> = {},
+  ): Promise<void> {
+    await this.upsertPlanSubjectPrep(userId, planId, {
+      [subject]: this.createSubjectPrepStatus(subject, status, details),
+    });
+  }
+
+  private async generateSingleSubjectPrep(
+    subject: string,
+    profileData: any,
+    jdData: any,
+    overrides: PracticeGenerationOverrides,
+  ): Promise<[string, Record<string, unknown>] | null> {
+    const mappedLanguage = this.mapSubjectToLanguage(subject);
+    const datasetLanguage = this.mapSubjectToDatasetLanguage(subject);
+    const resolvedQuestionCount =
+      typeof overrides.questionCount === 'number' && overrides.questionCount > 0
+        ? Math.max(1, Math.trunc(overrides.questionCount))
+        : 8;
+    const learnerDifficulty = this.resolveLearnerDifficulty(
+      overrides.learnerLevel,
+      profileData.experience_level,
+    );
+    const topicInfo = this.getPlanTopicInfo(subject);
+    const isProblemSolving = this.isProblemSolvingSubject(subject);
+    const timeoutMs = this.getSubjectPrepTimeoutMs(subject, 220000);
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+    try {
+      if (isProblemSolving) {
+        const subjectResponse = await fetch(
+          `${this.aiServiceUrl}/interview/subject-prep`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              subject,
+              job_description: jdData.job_description,
+              experience_level: profileData.experience_level,
+              company_name: profileData.company_name,
+              total_questions: resolvedQuestionCount,
+            }),
+            signal: controller.signal,
+          },
+        );
+
+        if (!subjectResponse.ok) {
+          console.error(
+            `[generateInterviewPlan] Problem solving subject prep failed: ${subjectResponse.status}`,
+          );
+          return null;
+        }
+
+        const subjectData = await subjectResponse.json();
+        return [
+          subject,
+          {
+            ...subjectData,
+            subject,
+          },
+        ] as const;
+      }
+
+      const solutionCodingLanguage = this.resolveSolutionCodingLanguage(
+        subject,
+        mappedLanguage,
+      );
+
+      const subjectResponse = await fetch(`${this.aiServiceUrl}/generate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          field: 'Data Analytics',
+          domain:
+            profileData.company_name ||
+            profileData.industry ||
+            'General',
+          subject,
+          topic: topicInfo.topic,
+          topic_hierarchy: topicInfo.topicHierarchy,
+          future_topics: [],
+          learner_level: this.mapDifficultyToLevel(learnerDifficulty),
+          coding_language: mappedLanguage,
+          solution_coding_language: solutionCodingLanguage,
+          dataset_creation_coding_language: datasetLanguage,
+          total_questions: resolvedQuestionCount,
+          verify_locally: false,
+        }),
+        signal: controller.signal,
+      });
+
+      if (!subjectResponse.ok) {
+        console.error(
+          `[generateInterviewPlan] Failed to generate prep for ${subject}: ${subjectResponse.status}`,
+        );
+        return null;
+      }
+
+      const subjectData = await subjectResponse.json();
+      const normalizedSubjectData =
+        subject === 'Domain Knowledge'
+          ? {
+              subject,
+              domain_knowledge_text:
+                subjectData.domain_knowledge_text ||
+                subjectData.business_context ||
+                '',
+            }
+          : {
+              ...subjectData,
+              subject,
+            };
+
+      return [subject, normalizedSubjectData] as const;
+    } catch (error) {
+      if (
+        error instanceof DOMException &&
+        error.name === 'AbortError'
+      ) {
+        console.warn(
+          `[generateInterviewPlan] Prep generation timed out for ${subject}`,
+        );
+        return null;
+      }
+      console.error(
+        `[generateInterviewPlan] Error generating prep for ${subject}:`,
+        error,
+      );
+      return null;
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  }
+
   async generateInterviewPlan(
     userId: string,
     dto: GenerateInterviewPlanDto,
@@ -329,20 +500,16 @@ export class InterviewPrepService {
       const subjects = Array.from(
         new Set(
           (
-            dto.suggested_subjects || [
-              'SQL',
-              'Python',
-              'Power BI',
-              'Guess Estimate',
-              'Statistics',
-              'Domain Knowledge',
-              'Google Sheets',
-            ]
+            dto.suggested_subjects || ['Domain Knowledge']
           )
             .map((subject) => this.normalizeSubjectLabel(subject))
             .filter((subject) => Boolean(subject)),
         ),
       );
+      const parsedQuestionCount = Number(dto.question_count);
+      const resolvedQuestionCount = Number.isFinite(parsedQuestionCount)
+        ? Math.max(1, Math.trunc(parsedQuestionCount))
+        : 8;
       console.log(
         `[generateInterviewPlan] Generating plan for subjects: ${subjects.join(', ')}`,
       );
@@ -374,129 +541,52 @@ export class InterviewPrepService {
 
       const planContent = await basePlanResponse.json();
 
-      // Generate subject-specific prep materials for each subject
-      const subjectPrepMap = new Map();
-      for (const subject of subjects) {
-        try {
-          const subjectController = new AbortController();
-          const subjectTimeoutId = setTimeout(
-            () => subjectController.abort(),
-            220000,
-          );
+      const orderedSubjects = [
+        'Domain Knowledge',
+        ...subjects.filter(
+          (subject) => subject.toLowerCase() !== 'domain knowledge',
+        ),
+      ];
+      const subjectPrepMap = new Map<string, Record<string, unknown>>();
+      orderedSubjects.forEach((subject) => {
+        subjectPrepMap.set(
+          subject,
+          this.createSubjectPrepStatus(subject, 'in_progress'),
+        );
+      });
 
-          try {
-            const mappedLanguage = this.mapSubjectToLanguage(subject);
-            const datasetLanguage = this.mapSubjectToDatasetLanguage(subject);
-            const learnerDifficulty = this.resolveLearnerDifficulty(
+      for (const subject of orderedSubjects) {
+        const generated = await this.generateSingleSubjectPrep(
+          subject,
+          profileData,
+          jdData,
+          {
+            learnerLevel: this.resolveLearnerDifficulty(
               undefined,
               profileData.experience_level,
-            );
-
-            const topicInfo = this.getPlanTopicInfo(subject);
-            const isProblemSolving = this.isProblemSolvingSubject(subject);
-            if (isProblemSolving) {
-              const subjectResponse = await fetch(
-                `${this.aiServiceUrl}/interview/subject-prep`,
-                {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({
-                    subject,
-                    job_description: jdData.job_description,
-                    experience_level: profileData.experience_level,
-                    company_name: profileData.company_name,
-                  }),
-                  signal: subjectController.signal,
-                },
-              );
-
-              if (subjectResponse.ok) {
-                const subjectData = await subjectResponse.json();
-                subjectPrepMap.set(subject, {
-                  ...subjectData,
-                  subject,
-                });
-                console.log(
-                  `[generateInterviewPlan] Generated problem solving case studies for ${subject}`,
-                );
-              } else {
-                console.error(
-                  `[generateInterviewPlan] Problem solving subject prep failed: ${subjectResponse.status}`,
-                );
-              }
-              continue;
-            }
-
-            const solutionCodingLanguage = this.resolveSolutionCodingLanguage(
-              subject,
-              mappedLanguage,
-            );
-
-            const subjectResponse = await fetch(
-              `${this.aiServiceUrl}/generate`,
-              {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                  field: 'Data Analytics',
-                  domain:
-                    profileData.company_name ||
-                    profileData.industry ||
-                    'General',
-                  subject,
-                  topic: topicInfo.topic,
-                  topic_hierarchy: topicInfo.topicHierarchy,
-                  future_topics: [],
-                  learner_level: this.mapDifficultyToLevel(learnerDifficulty),
-                  coding_language: mappedLanguage,
-                  solution_coding_language: solutionCodingLanguage,
-                  dataset_creation_coding_language: datasetLanguage,
-                  verify_locally: false,
-                }),
-                signal: subjectController.signal,
-              },
-            );
-
-            if (subjectResponse.ok) {
-              const subjectData = await subjectResponse.json();
-              if (subject === 'Domain Knowledge') {
-                subjectPrepMap.set(subject, {
-                  subject,
-                  domain_knowledge_text:
-                    subjectData.domain_knowledge_text ||
-                    subjectData.business_context ||
-                    '',
-                });
-              } else {
-                subjectPrepMap.set(subject, {
-                  ...subjectData,
-                  subject,
-                });
-              }
-              console.log(
-                `[generateInterviewPlan] Generated prep for ${subject}`,
-              );
-            } else {
-              console.error(
-                `[generateInterviewPlan] Failed to generate prep for ${subject}`,
-              );
-            }
-          } finally {
-            clearTimeout(subjectTimeoutId);
-          }
-        } catch (error) {
-          console.error(
-            `[generateInterviewPlan] Error generating prep for ${subject}:`,
-            error,
-          );
+            ),
+            questionCount: resolvedQuestionCount,
+          },
+        );
+        if (generated) {
+          subjectPrepMap.set(generated[0], {
+            ...generated[1],
+            subject: generated[0],
+            generation_status: 'ready',
+            generation_error: null,
+            generation_updated_at: new Date().toISOString(),
+          });
+          break;
         }
       }
 
       // Combine plan content with subject prep data
       const enrichedPlanContent = {
         ...planContent,
+        question_count: resolvedQuestionCount,
+        question_count_per_subject: resolvedQuestionCount,
         subject_prep: Object.fromEntries(subjectPrepMap),
-        subjects_covered: Array.from(subjectPrepMap.keys()),
+        subjects_covered: orderedSubjects,
       };
 
       // Save plan to database
@@ -519,36 +609,19 @@ export class InterviewPrepService {
       const savedPlan = planData?.[0];
       if (savedPlan) {
         try {
-          const migrationResult = await this.migratePlanDataToTables(userId, {
-            plan_id: savedPlan.id,
-            overwrite_existing: false,
-          });
-          if (!migrationResult.success) {
-            console.warn(
-              '[generateInterviewPlan] Automatic plan data migration completed with warnings:',
-              migrationResult,
-            );
-          }
+          void this.finalizeGeneratedPlanInBackground(
+            userId,
+            profileData,
+            jdData,
+            savedPlan.id,
+            dto.profile_id ?? null,
+            dto.jd_id ?? null,
+            orderedSubjects,
+            subjectPrepMap,
+            resolvedQuestionCount,
+          );
 
-          try {
-            await this.persistProblemSolvingCaseStudies(
-              userId,
-              profileData.id,
-              jdData.id,
-              savedPlan.id,
-              subjectPrepMap,
-            );
-          } catch (error) {
-            console.error(
-              '[generateInterviewPlan] Failed to persist Problem Solving case studies:',
-              error,
-            );
-          }
-
-          return {
-            ...(savedPlan as InterviewPlanResponse),
-            migration_result: migrationResult,
-          };
+          return savedPlan as InterviewPlanResponse;
         } catch (error) {
           console.error(
             '[generateInterviewPlan] Failed to auto-save generated plan data:',
@@ -561,6 +634,97 @@ export class InterviewPrepService {
     } catch (error) {
       throw new BadRequestException(
         `Failed to generate interview plan: ${error.message}`,
+      );
+    }
+  }
+
+  private async finalizeGeneratedPlanInBackground(
+    userId: string,
+    profileData: any,
+    jdData: any,
+    planId: number,
+    profileId: number | null,
+    jdId: number | null,
+    subjects: string[],
+    subjectPrepMap: Map<string, Record<string, unknown>>,
+    questionCount?: number,
+  ): Promise<void> {
+    try {
+      const resolvedQuestionCount =
+        typeof questionCount === 'number' && questionCount > 0
+          ? Math.max(1, Math.trunc(questionCount))
+          : 8;
+      for (const subject of subjects) {
+        const existingStatus = subjectPrepMap.get(subject)?.generation_status;
+        if (existingStatus === 'ready') {
+          continue;
+        }
+        const generated = await this.generateSingleSubjectPrep(subject, {
+          ...profileData,
+        }, {
+          ...jdData,
+        }, {
+          learnerLevel: undefined,
+          questionCount: resolvedQuestionCount,
+        });
+
+        if (!generated) {
+          await this.setPlanSubjectPrepStatus(
+            userId,
+            planId,
+            subject,
+            'failed',
+            {
+              generation_error:
+                'Timed out or failed during background generation',
+            },
+          );
+          continue;
+        }
+
+        const readySubjectData = {
+          ...generated[1],
+          subject: generated[0],
+          generation_status: 'ready',
+          generation_error: null,
+          generation_updated_at: new Date().toISOString(),
+        };
+        subjectPrepMap.set(generated[0], readySubjectData);
+        await this.upsertPlanSubjectPrep(userId, planId, {
+          [generated[0]]: readySubjectData,
+        });
+      }
+
+      const migrationResult = await this.migratePlanDataToTables(userId, {
+        plan_id: planId,
+        overwrite_existing: false,
+      });
+
+      if (!migrationResult.success) {
+        console.warn(
+          '[generateInterviewPlan] Automatic plan data migration completed with warnings:',
+          migrationResult,
+        );
+      }
+
+      try {
+        await this.persistProblemSolvingCaseStudies(
+          userId,
+          profileId,
+          jdId,
+          planId,
+          subjectPrepMap,
+        );
+      } catch (error) {
+        console.error(
+          '[generateInterviewPlan] Failed to persist Problem Solving case studies:',
+          error,
+        );
+      }
+    } catch (error) {
+      console.error(
+        '[generateInterviewPlan] Background finalization failed:',
+        error,
       );
     }
   }
@@ -1284,6 +1448,7 @@ export class InterviewPrepService {
         topic,
         topic_hierarchy,
         future_topics,
+        question_count,
         plan_id,
       } = dto;
 
@@ -1320,12 +1485,18 @@ export class InterviewPrepService {
         throw new BadRequestException('At least one subject is required');
       }
 
+      const parsedQuestionCount = Number(question_count);
+      const resolvedQuestionCount = Number.isFinite(parsedQuestionCount)
+        ? Math.max(1, Math.trunc(parsedQuestionCount))
+        : 8;
+
       const overrides: PracticeGenerationOverrides = {
         domain,
         learnerLevel: learner_level,
         topic,
         topicHierarchy: topic_hierarchy,
         futureTopics: future_topics,
+        questionCount: resolvedQuestionCount,
       };
 
       for (const subject of subjectsToGenerate) {
@@ -1380,10 +1551,26 @@ export class InterviewPrepService {
                 ? { ...exerciseData.plan_subject_data }
                 : {};
             planData.subject = subject;
+            planData.question_count = resolvedQuestionCount;
+            planData.generation_status = 'ready';
+            planData.generation_error = null;
+            planData.generation_updated_at = new Date().toISOString();
             accumulatedPlanSubjectData[subject] = planData;
           }
         } catch (error) {
           console.error(`Error generating exercise for ${subject}:`, error);
+          if (plan_id) {
+            await this.setPlanSubjectPrepStatus(
+              userId,
+              plan_id,
+              subject,
+              'failed',
+              {
+                generation_error:
+                  error instanceof Error ? error.message : String(error),
+              },
+            );
+          }
         }
       }
 
@@ -1417,6 +1604,53 @@ export class InterviewPrepService {
     } catch (error) {
       throw new BadRequestException(
         `Failed to generate practice exercises: ${error.message}`,
+      );
+    }
+  }
+
+  async regeneratePlanSubjectExercises(
+    userId: string,
+    planId: number,
+    subject: string,
+  ): Promise<PracticeExerciseResponse[]> {
+    try {
+      const { data: plan, error: planError } = await this.supabase
+        .from('interview_prep_plans')
+        .select('profile_id, jd_id, plan_content')
+        .eq('id', planId)
+        .eq('user_id', userId)
+        .single();
+
+      if (planError || !plan) {
+        throw new NotFoundException('Plan not found');
+      }
+
+      const profileId = Number(plan.profile_id);
+      const jdId = Number(plan.jd_id);
+      const planContent = (plan.plan_content || {}) as Record<string, unknown>;
+      const planQuestionCountRaw =
+        planContent.question_count_per_subject ??
+        planContent.question_count ??
+        8;
+      const parsedPlanQuestionCount = Number(planQuestionCountRaw);
+      const resolvedPlanQuestionCount = Number.isFinite(parsedPlanQuestionCount)
+        ? Math.max(1, Math.trunc(parsedPlanQuestionCount))
+        : 8;
+      if (Number.isNaN(profileId) || Number.isNaN(jdId)) {
+        throw new BadRequestException('Plan is missing profile or JD references');
+      }
+
+      return this.generatePracticeExercises(userId, {
+        profile_id: profileId,
+        jd_id: jdId,
+        subject,
+        subjects: [subject],
+        plan_id: planId,
+        question_count: resolvedPlanQuestionCount,
+      });
+    } catch (error) {
+      throw new BadRequestException(
+        `Failed to regenerate subject ${subject}: ${error.message}`,
       );
     }
   }
@@ -1522,12 +1756,12 @@ export class InterviewPrepService {
 
     const normalized = trimmed.toLowerCase();
     const aliasMap: Record<string, string> = {
-      excel: 'Google Sheets',
-      'google sheet': 'Google Sheets',
-      'google sheets': 'Google Sheets',
-      google_sheets: 'Google Sheets',
-      sheet: 'Google Sheets',
-      sheets: 'Google Sheets',
+      excel: 'Excel',
+      'google sheet': 'Excel',
+      'google sheets': 'Excel',
+      google_sheets: 'Excel',
+      sheet: 'Excel',
+      sheets: 'Excel',
       'problem solving': 'Problem Solving',
       'art of problem solving': 'Problem Solving',
       aops: 'Problem Solving',
@@ -1569,16 +1803,17 @@ export class InterviewPrepService {
       overrides.futureTopics && overrides.futureTopics.length > 0
         ? overrides.futureTopics
         : undefined;
+    const resolvedQuestionCount =
+      typeof overrides.questionCount === 'number' && overrides.questionCount > 0
+        ? Math.max(1, Math.trunc(overrides.questionCount))
+        : 8;
     const learnerDifficulty = this.resolveLearnerDifficulty(
       overrides.learnerLevel,
       profileData.experience_level,
     );
     if (this.isProblemSolvingSubject(subject)) {
       const controller = new AbortController();
-      const timeoutMs =
-        Number(process.env.AI_TIMEOUT_MS) ||
-        Number(process.env.AI_TIMEOUT) ||
-        120000;
+      const timeoutMs = this.getSubjectPrepTimeoutMs(subject, 220000);
       const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
       try {
         const response = await fetch(
@@ -1654,10 +1889,11 @@ export class InterviewPrepService {
       coding_language: mappedLanguage,
       solution_coding_language: mappedLanguage,
       dataset_creation_coding_language: datasetLanguage,
+      total_questions: resolvedQuestionCount,
       verify_locally: false,
     };
 
-    const timeoutMs = Number(process.env.AI_TIMEOUT_MS) || 120000;
+    const timeoutMs = this.getSubjectPrepTimeoutMs(subject, 220000);
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
@@ -1689,6 +1925,7 @@ export class InterviewPrepService {
       const planSubjectData = {
         ...data,
         subject,
+        question_count: resolvedQuestionCount,
       };
 
       return {
@@ -1721,7 +1958,7 @@ export class InterviewPrepService {
       SQL: 'SQL',
       Python: 'Python',
       'Power BI': 'SQL',
-      'Google Sheets': 'Google Sheets',
+      Excel: 'Excel',
       Statistics: 'Python',
       Communication: 'English',
       'Case Studies': 'SQL',
@@ -1736,7 +1973,7 @@ export class InterviewPrepService {
       SQL: 'SQL',
       Python: 'Python',
       'Power BI': 'SQL',
-      'Google Sheets': 'CSV',
+      Excel: 'CSV',
       Statistics: 'Python',
       Communication: 'Text',
       'Case Studies': 'SQL',

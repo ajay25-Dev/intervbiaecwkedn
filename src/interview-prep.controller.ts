@@ -247,6 +247,20 @@ export class InterviewPrepController {
     return this.service.generatePracticeExercises(userId, dto);
   }
 
+  @Post('plan/:planId/subjects/:subject/retry')
+  async retryPlanSubject(
+    @Request() req,
+    @Param('planId', ParseIntPipe) planId: number,
+    @Param('subject') subject: string,
+  ) {
+    const userId = this.getUserId(req);
+    return this.service.regeneratePlanSubjectExercises(
+      userId,
+      planId,
+      subject,
+    );
+  }
+
   // Migration endpoints
   @Post('plan/:planId/migrate')
   async migratePlanData(
