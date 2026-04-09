@@ -261,7 +261,14 @@ export class KPIDetail {
 }
 
 export class DomainKPIResponse {
+  company_name?: string;
   company_overview: string;
+  division?: string;
+  headquarters?: string;
+  founded_year?: string;
+  revenue_fy?: string;
+  number_of_employees?: string;
+  top_strategic_priorities?: string[];
   domain_snapshot: string;
   kpis: KPIDetail[];
 }
