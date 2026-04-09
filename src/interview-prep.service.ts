@@ -306,21 +306,34 @@ export class InterviewPrepService {
     );
   }
 
-  private getSubjectPrepTimeoutMs(subject: string, fallbackMs: number): number {
+  private getSubjectPrepTimeoutMs(
+    subject: string,
+    fallbackMs: number,
+    questionCount = 8,
+  ): number {
     const normalized = this.normalizeSubjectKey(subject);
+    const questionBoost =
+      questionCount > 20 ? 120000 : questionCount > 12 ? 60000 : 0;
     if (
       normalized === 'excel' ||
       normalized === 'statistics' ||
       normalized === 'python' ||
+      normalized === 'sql' ||
       normalized === 'power bi' ||
       normalized === 'domain knowledge'
     ) {
-      return Math.max(fallbackMs, 300000);
+      const floor =
+        normalized === 'excel'
+          ? 420000
+          : normalized === 'sql'
+            ? 360000
+            : 300000;
+      return Math.max(fallbackMs + questionBoost, floor + questionBoost);
     }
     if (normalized === 'problem solving') {
-      return Math.max(fallbackMs, 240000);
+      return Math.max(fallbackMs + questionBoost, 240000 + questionBoost);
     }
-    return fallbackMs;
+    return fallbackMs + questionBoost;
   }
 
   private createSubjectPrepStatus(
@@ -1781,6 +1794,58 @@ export class InterviewPrepService {
     return this.normalizeSubjectKey(subject) === 'problem solving';
   }
 
+  private isCodingPracticeSubject(subject: string): boolean {
+    const normalized = this.normalizeSubjectKey(subject);
+    return [
+      'sql',
+      'python',
+      'excel',
+      'statistics',
+      'power bi',
+      'powerbi',
+      'google sheets',
+      'google_sheets',
+      'sheets',
+      'sheet',
+    ].includes(normalized);
+  }
+
+  private resolveCanonicalQuestionAnswer(
+    question: any,
+    subject: string,
+    caseStudy?: any,
+  ): string {
+    const normalizeText = (value: unknown): string =>
+      typeof value === 'string' ? value.trim() : '';
+
+    const candidates = this.isCodingPracticeSubject(subject)
+      ? [
+          question?.answer_sql,
+          question?.answer,
+          question?.expected_answer,
+          question?.sample_output,
+          question?.expected_approach,
+          caseStudy?.solution_outline,
+        ]
+      : [
+          question?.expected_approach,
+          question?.answer,
+          question?.expected_answer,
+          question?.sample_output,
+          question?.answer_sql,
+          caseStudy?.solution_outline,
+        ];
+
+    for (const candidate of candidates) {
+      const normalized = normalizeText(candidate);
+      if (normalized) {
+        return normalized;
+      }
+    }
+
+    return '';
+  }
+
   private async generateSingleSubjectExercise(
     subject: string,
     profileData: any,
@@ -1813,7 +1878,11 @@ export class InterviewPrepService {
     );
     if (this.isProblemSolvingSubject(subject)) {
       const controller = new AbortController();
-      const timeoutMs = this.getSubjectPrepTimeoutMs(subject, 220000);
+      const timeoutMs = this.getSubjectPrepTimeoutMs(
+        subject,
+        220000,
+        resolvedQuestionCount,
+      );
       const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
       try {
         const response = await fetch(
@@ -1861,9 +1930,22 @@ export class InterviewPrepService {
               `Question ${idx + 1}`,
             difficulty: question.difficulty || 'Medium',
             topics: question.topics || [subject],
-            hint: question.expected_approach || '',
-            expected_answer: '',
+            hint: question.expected_approach || question.answer || '',
+            expected_answer:
+              question.answer ||
+              question.expected_answer ||
+              question.answer_sql ||
+              question.sample_output ||
+              question.expected_approach ||
+              '',
             adaptive_note: question.adaptive_note || '',
+            answer:
+              question.answer ||
+              question.expected_answer ||
+              question.answer_sql ||
+              question.sample_output ||
+              question.expected_approach ||
+              '',
           })),
           data_creation_sql: '',
           data_creation_python: '',
@@ -1893,7 +1975,11 @@ export class InterviewPrepService {
       verify_locally: false,
     };
 
-    const timeoutMs = this.getSubjectPrepTimeoutMs(subject, 220000);
+    const timeoutMs = this.getSubjectPrepTimeoutMs(
+      subject,
+      220000,
+      resolvedQuestionCount,
+    );
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
@@ -1938,8 +2024,23 @@ export class InterviewPrepService {
           difficulty: q.difficulty || 'Intermediate',
           topics: q.topics || [subject],
           hint: q.adaptive_note || '',
-          expected_answer: data.answers_sql_map?.[q.id] || '',
+          expected_answer:
+            data.answers_sql_map?.[q.id] ||
+            q.answer ||
+            q.answer_sql ||
+            q.expected_answer ||
+            q.sample_output ||
+            q.expected_approach ||
+            '',
           adaptive_note: q.adaptive_note || '',
+          answer:
+            data.answers_sql_map?.[q.id] ||
+            q.answer ||
+            q.answer_sql ||
+            q.expected_answer ||
+            q.sample_output ||
+            q.expected_approach ||
+            '',
         })),
         data_creation_sql: data.data_creation_sql || '',
         data_creation_python: data.data_creation_python || '',
@@ -2317,6 +2418,19 @@ export class InterviewPrepService {
     caseStudy?: any,
   ): Promise<void> {
     // Create question
+    const resolvedAnswerText = this.resolveCanonicalQuestionAnswer(
+      question,
+      subject,
+      caseStudy,
+    );
+
+    if (!resolvedAnswerText) {
+      result.errors.push(
+        `Missing answer for question ${questionNumber} (${subject})`,
+      );
+      return;
+    }
+
     const questionBusinessContext =
       question.business_context ||
       question.business_question ||
@@ -2367,6 +2481,7 @@ export class InterviewPrepService {
         hint: question.expected_approach,
         sample_input: question.sample_input,
         sample_output: question.sample_output,
+        answer: resolvedAnswerText,
         business_context: questionBusinessContext,
         dataset_context: questionDatasetContext,
         dataset_description: questionDatasetDescription,
@@ -2381,10 +2496,12 @@ export class InterviewPrepService {
           question.case_study_problem_statement ??
           caseStudyMeta.problem_statement ??
           null,
-      },
-      expected_output_table: question.sample_output
-        ? [question.sample_output]
-        : null,
+        },
+      expected_output_table: question.expected_output_table
+        ? question.expected_output_table
+        : question.sample_output
+          ? [question.sample_output]
+          : null,
       created_at: new Date().toISOString(),
     };
 
@@ -2406,25 +2523,22 @@ export class InterviewPrepService {
 
     result.questions_created++;
 
-    // Create answer if expected output exists
-    if (question.sample_output || question.expected_approach) {
-      const answerData = {
-        id: uuidv4(),
-        question_id: questionRecord.id,
-        answer_text: question.sample_output || question.expected_approach,
-        is_case_sensitive: false,
-        explanation: question.expected_approach,
-      };
+    const answerData = {
+      id: uuidv4(),
+      question_id: questionRecord.id,
+      answer_text: resolvedAnswerText,
+      is_case_sensitive: false,
+      explanation: question.expected_approach || resolvedAnswerText,
+    };
 
-      const { error: answerError } = await this.supabase
-        .from('interview_practice_answers')
-        .insert(answerData);
+    const { error: answerError } = await this.supabase
+      .from('interview_practice_answers')
+      .insert(answerData);
 
-      if (answerError) {
-        result.errors.push(`Failed to create answer: ${answerError.message}`);
-      } else {
-        result.answers_created++;
-      }
+    if (answerError) {
+      result.errors.push(`Failed to create answer: ${answerError.message}`);
+    } else {
+      result.answers_created++;
     }
   }
 
@@ -2891,6 +3005,13 @@ export class InterviewPrepService {
           question.answer ||
           question.answer_sql ||
           question.expected_answer ||
+          '',
+        answer:
+          question.answer ||
+          question.answer_sql ||
+          question.expected_answer ||
+          question.sample_output ||
+          question.expected_approach ||
           '',
         sample_output:
           question.sample_output ||
