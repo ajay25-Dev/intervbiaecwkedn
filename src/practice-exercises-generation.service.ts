@@ -376,6 +376,7 @@ export class PracticeExercisesGenerationService {
       type === 'google sheets' ||
       type === 'sheets' ||
       type === 'sheet' ||
+      type === 'excel' ||
       type === 'statistics' ||
       type === 'statistic'
     ) {

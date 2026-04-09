@@ -117,6 +117,10 @@ export class GenerateInterviewPlanDto {
   @IsString({ each: true })
   @IsOptional()
   suggested_subjects?: string[];
+
+  @IsNumber()
+  @IsOptional()
+  question_count?: number;
 }
 
 export class GenerateInterviewQuestionsDto {
@@ -287,6 +291,9 @@ export class SubjectPrepResponse {
   case_studies: SubjectCaseStudy[];
   key_learning_points: string[];
   common_mistakes: string[];
+  generation_status?: 'in_progress' | 'ready' | 'failed';
+  generation_error?: string | null;
+  generation_updated_at?: string;
 }
 
 export class GeneratePracticeExercisesDto {
@@ -324,6 +331,10 @@ export class GeneratePracticeExercisesDto {
   @IsString({ each: true })
   @IsOptional()
   future_topics?: string[];
+
+  @IsNumber()
+  @IsOptional()
+  question_count?: number;
 
   @IsNumber()
   @IsOptional()
