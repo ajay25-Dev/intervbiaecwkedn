@@ -418,6 +418,114 @@ export class InterviewPrepService {
         ] as const;
       }
 
+      if (this.normalizeSubjectKey(subject) === 'domain knowledge') {
+        const domainCompanyName =
+          profileData?.company_name?.trim() ||
+          jdData?.job_description?.company_name?.trim() ||
+          profileData?.industry?.trim() ||
+          'Company';
+        const controller = new AbortController();
+        const timeoutMs = this.getSubjectPrepTimeoutMs(
+          subject,
+          220000,
+          resolvedQuestionCount,
+        );
+        const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+        try {
+          const response = await fetch(
+            `${this.aiServiceUrl}/interview/domain-kpi`,
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                company_name: domainCompanyName,
+                job_description: jdData?.job_description,
+                domain:
+                  profileData?.industry?.trim() ||
+                  profileData?.company_name?.trim() ||
+                  null,
+              }),
+              signal: controller.signal,
+            },
+          );
+          clearTimeout(timeoutId);
+
+          if (!response.ok) {
+            console.error(
+              `[generateInterviewPlan] Failed to generate domain knowledge for ${subject}: ${response.status}`,
+            );
+            return null;
+          }
+
+          const data = await response.json();
+          const kpis = Array.isArray(data?.kpis) ? data.kpis : [];
+          const topPriorities = Array.isArray(data?.top_strategic_priorities)
+            ? data.top_strategic_priorities
+                .map((priority: unknown) => String(priority || '').trim())
+                .filter((priority: string) => priority.length > 0)
+                .slice(0, 3)
+            : [];
+          const companyNameValue =
+            data?.company_name?.trim() || domainCompanyName;
+          const divisionValue =
+            data?.division?.trim() ||
+            data?.domain?.trim() ||
+            profileData?.industry?.trim() ||
+            '[General Business]';
+          const headquartersValue =
+            data?.headquarters?.trim() ||
+            data?.hq?.trim() ||
+            '[City of HQ - to be filled based on actual data]';
+          const foundedYearValue =
+            data?.founded_year?.trim() ||
+            data?.foundedYear?.trim() ||
+            '[Year company was founded - to be filled based on actual data]';
+          const revenueFyValue =
+            data?.revenue_fy?.trim() ||
+            data?.revenueFY?.trim() ||
+            '[Latest fiscal year revenue]';
+          const employeeCountValue =
+            data?.number_of_employees?.trim() ||
+            data?.numberOfEmployees?.trim() ||
+            '[Total headcount]';
+          const priorityLines = topPriorities.length
+            ? topPriorities.map((priority: string) => `- ${priority}`)
+            : [
+                '- Omnichannel Growth',
+                '- Cost Optimization',
+                '- Customer Experience Enhancement',
+              ];
+          const domainKnowledgeText = [
+            'Company Overview',
+            `Company: ${companyNameValue}`,
+            `Division: ${divisionValue}`,
+            `Headquarters: ${headquartersValue}`,
+            `FoundedYear: ${foundedYearValue}`,
+            `RevenueFY: ${revenueFyValue}`,
+            `NumberOfEmployees: ${employeeCountValue}`,
+            '',
+            'Top 3 Strategic Priorities:',
+            ...priorityLines.slice(0, 3),
+          ].join('\n');
+
+          return [
+            subject,
+            {
+              ...data,
+              subject,
+              header_text: `${companyNameValue} Domain Knowledge`,
+              domain_knowledge_text: domainKnowledgeText,
+              generation_status: 'ready',
+              generation_error: null,
+              generation_updated_at: new Date().toISOString(),
+            },
+          ] as const;
+        } catch (error) {
+          clearTimeout(timeoutId);
+          throw error;
+        }
+      }
+
       const solutionCodingLanguage = this.resolveSolutionCodingLanguage(
         subject,
         mappedLanguage,
