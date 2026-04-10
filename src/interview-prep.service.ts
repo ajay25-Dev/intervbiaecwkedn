@@ -444,6 +444,11 @@ export class InterviewPrepService {
                   profileData?.industry?.trim() ||
                   profileData?.company_name?.trim() ||
                   null,
+                role_title:
+                  jdData?.job_description?.role_title?.trim() ||
+                  profileData?.role_title?.trim() ||
+                  'Data Analyst',
+                business_function: 'Analytics',
               }),
               signal: controller.signal,
             },
@@ -459,6 +464,11 @@ export class InterviewPrepService {
 
           const data = await response.json();
           const kpis = Array.isArray(data?.kpis) ? data.kpis : [];
+          const domainKeywords = Array.isArray(data?.domain_keywords)
+            ? data.domain_keywords
+                .map((keyword: unknown) => String(keyword || '').trim())
+                .filter((keyword: string) => keyword.length > 0)
+            : [];
           const topPriorities = Array.isArray(data?.top_strategic_priorities)
             ? data.top_strategic_priorities
                 .map((priority: unknown) => String(priority || '').trim())
@@ -467,11 +477,22 @@ export class InterviewPrepService {
             : [];
           const companyNameValue =
             data?.company_name?.trim() || domainCompanyName;
+          const roleTitleValue =
+            data?.role_title?.trim() ||
+            jdData?.job_description?.role_title?.trim() ||
+            profileData?.role_title?.trim() ||
+            'Data Analyst';
+          const businessFunctionValue =
+            data?.business_function?.trim() || 'Analytics';
           const divisionValue =
             data?.division?.trim() ||
             data?.domain?.trim() ||
             profileData?.industry?.trim() ||
             '[General Business]';
+          const sectorSubSectorValue =
+            data?.sector_sub_sector?.trim() ||
+            data?.domain_snapshot?.trim() ||
+            '[Sector / sub-sector]';
           const headquartersValue =
             data?.headquarters?.trim() ||
             data?.hq?.trim() ||
@@ -488,6 +509,12 @@ export class InterviewPrepService {
             data?.number_of_employees?.trim() ||
             data?.numberOfEmployees?.trim() ||
             '[Total headcount]';
+          const domainKeywordsText =
+            domainKeywords.length > 0
+              ? domainKeywords.join(', ')
+              : ['grocery retail', 'omnichannel', 'conversion rate']
+                  .filter((value) => value.length > 0)
+                  .join(', ');
           const priorityLines = topPriorities.length
             ? topPriorities.map((priority: string) => `- ${priority}`)
             : [
@@ -495,17 +522,130 @@ export class InterviewPrepService {
                 '- Cost Optimization',
                 '- Customer Experience Enhancement',
               ];
+          const businessModelLines = Array.isArray(data?.business_model)
+            ? data.business_model
+                .map((item: unknown) => String(item || '').trim())
+                .filter((item: string) => item.length > 0)
+            : [];
+          const valueChainLines = Array.isArray(data?.value_chain)
+            ? data.value_chain
+                .map((item: unknown) => String(item || '').trim())
+                .filter((item: string) => item.length > 0)
+            : [];
+          const analyticsLines = Array.isArray(data?.analytics_in_this_domain)
+            ? data.analytics_in_this_domain
+                .map((item: unknown) => String(item || '').trim())
+                .filter((item: string) => item.length > 0)
+            : [];
+          const formatParagraph = (value: unknown, fallback: string) => {
+            const text = String(value || '').trim();
+            return text || fallback;
+          };
+          const formatList = (items: string[], fallback: string) =>
+            items.length > 0 ? items.map((item: string) => `- ${item}`).join('\n') : `- ${fallback}`;
+          const kpiLines = kpis.length
+            ? kpis
+                .slice(0, 15)
+                .map((kpi: any, index: number) => {
+                  const name = kpi?.name || kpi?.kpi || `KPI ${index + 1}`;
+                  const definition = kpi?.definition || '[Definition not provided]';
+                  const formula = kpi?.formula || '[Formula not provided]';
+                  const whyMatters = kpi?.why_matters || kpi?.whyMatters || '[Why it matters not provided]';
+                  const example = kpi?.example || '[Example not provided]';
+                  return [
+                    `### ${index + 1}. KPI Name: ${name}`,
+                    `- **Definition**: ${definition}`,
+                    `- **Formula**: ${formula}`,
+                    `- **Why It Matters**: ${whyMatters}`,
+                    `- **Domain Example**: ${example}`,
+                  ].join('\n');
+                })
+                .join('\n\n')
+            : '### 1. KPI Name: [KPI not provided]\n- **Definition**: [Definition not provided]\n- **Formula**: [Formula not provided]\n- **Why It Matters**: [Why it matters not provided]\n- **Domain Example**: [Example not provided]';
+          const closingNote =
+            'This comprehensive overview of the company and its KPIs should help the learner speak confidently in interviews.';
           const domainKnowledgeText = [
-            'Company Overview',
-            `Company: ${companyNameValue}`,
-            `Division: ${divisionValue}`,
-            `Headquarters: ${headquartersValue}`,
-            `FoundedYear: ${foundedYearValue}`,
-            `RevenueFY: ${revenueFyValue}`,
-            `NumberOfEmployees: ${employeeCountValue}`,
+            '## STEP 1: CONTEXT SETUP',
+            '',
+            `### Company Name: ${companyNameValue}`,
+            `### Role Title: ${roleTitleValue}`,
+            `### Business Function: ${businessFunctionValue}`,
+            `### Domain Keywords: ${domainKeywordsText}`,
+            '',
+            '---',
+            '',
+            '## STEP 2: COMPANY + DOMAIN SNAPSHOT (Detailed)',
+            '',
+            '### Company Overview',
+            formatParagraph(
+              data?.company_overview,
+              '[Company overview not provided]',
+            ),
+            '',
+            '### Sector / Sub-sector',
+            formatParagraph(
+              data?.sector_sub_sector || data?.division || data?.domain,
+              '[Sector / sub-sector not provided]',
+            ),
+            '',
+            '### Business Model',
+            formatList(businessModelLines, '[Business model not provided]'),
+            '',
+            '### Value Chain',
+            formatList(valueChainLines, '[Value chain not provided]'),
+            '',
+            '### Core Customer Segments',
+            formatParagraph(
+              data?.core_customer_segments,
+              '[Core customer segments not provided]',
+            ),
+            '',
+            '### Operations',
+            formatParagraph(data?.operations, '[Operations not provided]'),
+            '',
+            '### Products/Services Portfolio',
+            formatParagraph(
+              data?.products_services_portfolio,
+              '[Products/services portfolio not provided]',
+            ),
+            '',
+            '### Geographic Presence',
+            formatParagraph(
+              data?.geographic_presence,
+              '[Geographic presence not provided]',
+            ),
+            '',
+            '### Competitors & Market Positioning',
+            formatParagraph(
+              data?.competitors_market_positioning,
+              '[Competitors & positioning not provided]',
+            ),
+            '',
+            '### Trends & Challenges',
+            formatParagraph(
+              data?.trends_challenges,
+              '[Trends and challenges not provided]',
+            ),
+            '',
+            '### Analytics in this Domain',
+            formatList(analyticsLines, '[Analytics in this domain not provided]'),
             '',
             'Top 3 Strategic Priorities:',
             ...priorityLines.slice(0, 3),
+            '',
+            '---',
+            '',
+            '## STEP 3: DOMAIN KPI MASTERCLASS',
+            '',
+            kpiLines,
+            '',
+            '---',
+            '',
+            '## STEP 4: CLOSING FOLLOW-UP',
+            '',
+            '📌 NOTES',
+            '',
+            closingNote,
           ].join('\n');
 
           return [
@@ -1511,6 +1651,8 @@ export class InterviewPrepService {
         company_name: dto.company_name,
         job_description: dto.job_description,
         domain: dto.domain,
+        role_title: dto.role_title,
+        business_function: dto.business_function,
       };
       console.log(
         `[generateDomainKPI] Calling ${this.aiServiceUrl}/interview/domain-kpi`,
