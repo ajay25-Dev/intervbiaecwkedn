@@ -250,6 +250,8 @@ export class DomainKPIDto {
   company_name: string;
   job_description?: string;
   domain?: string;
+  role_title?: string;
+  business_function?: string;
 }
 
 export class KPIDetail {
@@ -262,7 +264,20 @@ export class KPIDetail {
 
 export class DomainKPIResponse {
   company_name?: string;
+  role_title?: string;
+  business_function?: string;
+  domain_keywords?: string[];
   company_overview: string;
+  sector_sub_sector?: string;
+  business_model?: string[];
+  value_chain?: string[];
+  core_customer_segments?: string;
+  operations?: string;
+  products_services_portfolio?: string;
+  geographic_presence?: string;
+  competitors_market_positioning?: string;
+  trends_challenges?: string;
+  analytics_in_this_domain?: string[];
   division?: string;
   headquarters?: string;
   founded_year?: string;
