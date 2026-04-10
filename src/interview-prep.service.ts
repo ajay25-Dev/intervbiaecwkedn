@@ -224,7 +224,7 @@ export class InterviewPrepService {
       }
 
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 30000);
+      const timeoutId = setTimeout(() => controller.abort(), 90000);
 
       const requestBody = { jd_text: jobDescription };
       console.log(
@@ -915,7 +915,10 @@ export class InterviewPrepService {
         typeof questionCount === 'number' && questionCount > 0
           ? Math.max(1, Math.trunc(questionCount))
           : 8;
-      for (const subject of subjects) {
+      const backgroundSubjects = subjects.filter(
+        (subject) => this.normalizeSubjectKey(subject) !== 'domain knowledge',
+      );
+      for (const subject of backgroundSubjects) {
         const existingStatus = subjectPrepMap.get(subject)?.generation_status;
         if (existingStatus === 'ready') {
           continue;
@@ -2434,6 +2437,9 @@ export class InterviewPrepService {
       for (const [subject, subjectData] of Object.entries(
         planContent.subject_prep,
       )) {
+        if (this.normalizeSubjectKey(subject) === 'domain knowledge') {
+          continue;
+        }
         try {
           await this.processSubjectData(
             userId,
