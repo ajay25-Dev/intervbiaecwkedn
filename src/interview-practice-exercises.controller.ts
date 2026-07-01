@@ -16,15 +16,33 @@ import {
 import { InterviewPracticeExercisesService } from './interview-practice-exercises.service';
 import { PracticeCodingService } from './practice-coding.service';
 import { PracticeExercisesGenerationService } from './practice-exercises-generation.service';
+import { InterviewSqlSandboxService } from './interview-sql-sandbox.service';
 import { SupabaseGuard } from './auth/supabase.guard';
 
 @Controller('interview-prep')
 @UseGuards(SupabaseGuard)
 export class InterviewPracticeExercisesController {
+  private readonly nonExecutableLanguages = new Set([
+    'google_sheets',
+    'google sheets',
+    'google sheet',
+    'excel',
+    'power_bi',
+    'power bi',
+    'reasoning',
+    'problem_solving',
+    'problem solving',
+    'math',
+    'geometry',
+    'behavioral',
+    'communication',
+  ]);
+
   constructor(
     private readonly exercisesService: InterviewPracticeExercisesService,
     private readonly codingService: PracticeCodingService,
     private readonly practiceService: PracticeExercisesGenerationService,
+    private readonly sqlSandbox: InterviewSqlSandboxService,
   ) {}
 
   private getUserId(req: any): string {
@@ -33,6 +51,10 @@ export class InterviewPracticeExercisesController {
       throw new UnauthorizedException('User not authenticated');
     }
     return userId;
+  }
+
+  private isNonExecutableLanguage(language?: string): boolean {
+    return this.nonExecutableLanguages.has(String(language || '').trim().toLowerCase());
   }
 
   @Get('practice-exercises')
@@ -101,21 +123,44 @@ export class InterviewPracticeExercisesController {
     @Param('questionId') questionId: string,
     @Body()
     body: {
-      code: string;
+      code?: string;
+      query?: string;
       language: string;
+      mode?: 'run' | 'submit';
       test_cases?: any[];
       datasets?: any[];
     },
   ) {
     try {
-      if (!body.code || !body.language) {
-        throw new BadRequestException('Code and language are required');
+      const normalizedLanguage = (body.language || '').trim().toLowerCase();
+
+      // SQL questions: use PostgreSQL sandbox
+      if (normalizedLanguage === 'sql') {
+        const query = body.query || body.code || '';
+        if (!query) {
+          throw new BadRequestException('query is required for SQL execution');
+        }
+        return await this.sqlSandbox.run({
+          exercise_id: exerciseId,
+          question_id: questionId,
+          query,
+          mode: body.mode || 'run',
+          datasets: body.datasets,
+        });
+      }
+
+      // Python/other: use Judge0 via PracticeCodingService
+      if (!body.code) {
+        throw new BadRequestException('code is required');
+      }
+      if (!body.language) {
+        throw new BadRequestException('language is required');
       }
 
       const userId = this.getUserId(req);
       const token = req?.headers?.authorization || '';
 
-      const result = await this.codingService.execute(
+      return await this.codingService.execute(
         userId,
         exerciseId,
         questionId,
@@ -123,15 +168,15 @@ export class InterviewPracticeExercisesController {
         body.language,
         'coding',
         body.test_cases || [],
-        'sample',
+        body.mode === 'submit' ? 'submit' : 'sample',
         token,
         body.datasets || [],
       );
-
-      return result;
     } catch (error) {
       if (error instanceof HttpException) throw error;
-      throw new InternalServerErrorException(error.message);
+      throw new InternalServerErrorException(
+        error instanceof Error ? error.message : 'Execution failed',
+      );
     }
   }
 
@@ -155,20 +200,36 @@ export class InterviewPracticeExercisesController {
 
       const userId = this.getUserId(req);
       const token = req?.headers?.authorization || '';
+      const skipExecution = this.isNonExecutableLanguage(body.language);
 
-      const executionResult = await this.codingService.execute(
-        userId,
-        exerciseId,
-        questionId,
-        body.code,
-        body.language,
-        'coding',
-        body.test_cases || [],
-        'submit',
-        token,
-        body.datasets || [],
-        true,
-      );
+      const executionResult = skipExecution
+        ? {
+            success: true,
+            passed: false,
+            score: 0,
+            total_points: 0,
+            test_results: [],
+            overall_result: {
+              stdout: '',
+              stderr: '',
+              execution_time: 0,
+              memory_used: 0,
+              exit_code: 0,
+            },
+          }
+        : await this.codingService.execute(
+            userId,
+            exerciseId,
+            questionId,
+            body.code,
+            body.language,
+            'coding',
+            body.test_cases || [],
+            'submit',
+            token,
+            body.datasets || [],
+            true,
+          );
 
       // Only attempt to save to permanent storage if it's a real exercise
       let attemptId = executionResult.attempt_id;

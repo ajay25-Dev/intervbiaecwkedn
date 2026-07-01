@@ -47,6 +47,7 @@ import { SubjectSelectionController } from './subject-selection.controller';
 import { SubjectSelectionService } from './subject-selection.service';
 import { PracticeCodingController } from './practice-coding.controller';
 import { PracticeCodingService } from './practice-coding.service';
+import { Judge0Service } from './judge0.service';
 import { PracticeExerciseController } from './practice-exercise.controller';
 import { PracticeExerciseService } from './practice-exercise.service';
 import { AdminPracticeExercisesController } from './admin-practice-exercises.controller';
@@ -67,6 +68,8 @@ import { InterviewPrepController } from './interview-prep.controller';
 import { InterviewPrepService } from './interview-prep.service';
 import { InterviewPracticeExercisesController } from './interview-practice-exercises.controller';
 import { InterviewPracticeExercisesService } from './interview-practice-exercises.service';
+import { InterviewSqlSandboxService } from './interview-sql-sandbox.service';
+import { InterviewSqlSafetyService } from './interview-sql-safety.service';
 import { FileExtractionService } from './file-extraction.service';
 import { LoggingInterceptor } from './logging.interceptor';
 import { GamificationV2Module } from './gamification-v2/gamification.module';
@@ -133,12 +136,15 @@ import { DatabaseInitController } from './database-init.controller';
     CourseAssignmentsService,
     SubjectSelectionService,
     PracticeCodingService,
+    Judge0Service,
     PracticeExerciseService,
     SqlExecutionService,
     DatasetExecutionService,
     AdaptiveQuizService,
     InterviewPrepService,
     InterviewPracticeExercisesService,
+    InterviewSqlSandboxService,
+    InterviewSqlSafetyService,
     FileExtractionService,
     {
       provide: APP_INTERCEPTOR,
