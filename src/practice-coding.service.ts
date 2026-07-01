@@ -4,6 +4,7 @@ import {
   InternalServerErrorException,
 } from '@nestjs/common';
 import { createClient } from '@supabase/supabase-js';
+import { Judge0ExecutionResult, Judge0Service } from './judge0.service';
 
 export interface TestCase {
   input: string;
@@ -15,6 +16,10 @@ export interface TestCase {
   execution_time?: number;
   exit_code?: number;
   error_message?: string;
+  verdict?: Judge0ExecutionResult['verdict'];
+  compile_output?: string;
+  status_description?: string;
+  data_delivery?: 'stdin' | 'files' | 'inline' | 'none';
 }
 
 export interface ExecutionResult {
@@ -29,6 +34,10 @@ export interface ExecutionResult {
     execution_time: number;
     memory_used: number;
     exit_code: number;
+    compile_output?: string;
+    verdict?: Judge0ExecutionResult['verdict'];
+    status_description?: string;
+    data_delivery?: 'stdin' | 'files' | 'inline' | 'none';
   };
   attempt_id?: string;
 }
@@ -106,6 +115,8 @@ export class PracticeCodingService {
 
   private sectionQuestionsTableAvailable = true;
   private practiceDatasetsTableAvailable = true;
+
+  constructor(private readonly judge0Service: Judge0Service) {}
 
   async execute(
     userId: string,
@@ -188,8 +199,10 @@ export class PracticeCodingService {
         datasets = dbDatasets;
       }
 
+      const normalizedLanguage = this.normalizeLanguageCode(language);
+
       // Validate language support
-      if (!this.LANGUAGE_MAPPINGS[language]) {
+      if (!this.LANGUAGE_MAPPINGS[normalizedLanguage]) {
         throw new BadRequestException(`Unsupported language: ${language}`);
       }
 
@@ -197,8 +210,10 @@ export class PracticeCodingService {
       const executionStartTime = Date.now();
       const testResults = await this.executeAgainstTestCases(
         code,
-        language,
-        testCases,
+        normalizedLanguage,
+        testCases.length > 0
+          ? testCases
+          : [{ input: '', expected_output: '', is_hidden: false, points: 1 }],
         datasets,
       );
       const totalExecutionTime = Date.now() - executionStartTime;
@@ -213,6 +228,10 @@ export class PracticeCodingService {
         execution_time: totalExecutionTime,
         memory_used: 0, // Piston doesn't provide memory usage
         exit_code: testResults[0]?.exit_code || 0,
+        compile_output: testResults[0]?.compile_output || '',
+        verdict: testResults[0]?.verdict,
+        status_description: testResults[0]?.status_description,
+        data_delivery: testResults[0]?.data_delivery,
       };
 
       const result: ExecutionResult = {
@@ -232,7 +251,7 @@ export class PracticeCodingService {
             exerciseId,
             questionId,
             code,
-            language,
+            normalizedLanguage,
             testResults,
             score,
             passed,
@@ -247,6 +266,9 @@ export class PracticeCodingService {
 
       return result;
     } catch (error) {
+      if (error instanceof BadRequestException) {
+        throw error;
+      }
       console.error('Error executing code with test cases:', error);
       throw new InternalServerErrorException('Failed to execute code');
     }
@@ -258,115 +280,186 @@ export class PracticeCodingService {
     testCases: TestCase[],
     datasets: PracticeDataset[] = [],
   ): Promise<TestCase[]> {
-    const results: TestCase[] = [];
-    const langConfig = this.LANGUAGE_MAPPINGS[language];
-
-    // Prepare setup code from datasets
-    let setupCode = '';
-    if (datasets.length > 0) {
-      if (language === 'sql') {
-        setupCode = this.generateSQLSetup(datasets);
-      } else if (language === 'python') {
-        setupCode = this.generatePythonSetup(datasets);
-      }
-    }
-
-    // Execute sequentially to avoid overloading the API
-    for (const testCase of testCases) {
-      try {
+    // Run all test cases in parallel — much faster than sequential with delays
+    const settled = await Promise.allSettled(
+      testCases.map(async (testCase) => {
         const executionStartTime = Date.now();
-
-        // Prepare code with input
-        let executionCode = '';
-        const stdin = testCase.input;
-
-        // Handle different languages
-        if (language === 'python') {
-          // For Python, we can use stdin but also need setup code
-          executionCode = `${setupCode}\n\n${code}`;
-        } else if (language === 'javascript') {
-          // For JS, we might need to modify the code to read from a simulated input
-          if (stdin) {
-            executionCode = `const input = \`${stdin}\`;\n\n${code}`;
-          } else {
-            executionCode = code;
-          }
-        } else if (language === 'sql') {
-          // For SQL, we need a different approach - create a SQLite database in memory
-          executionCode = setupCode;
-
-          if (stdin) {
-            executionCode += `\nCREATE TABLE temp_data AS SELECT ${stdin};\n`;
-          }
-
-          executionCode += `\n${code}`;
-
-          if (stdin) {
-            executionCode += `\nSELECT * FROM temp_data;`;
-          }
-        } else {
-          executionCode = code;
-        }
-
-        const pistonPayload = {
-          language: langConfig.piston,
-          version: langConfig.version,
-          files: [
-            {
-              name: `main.${this.getFileExtension(language)}`,
-              content: executionCode,
-            },
-          ],
-          stdin: language === 'python' || language === 'sql' ? stdin : '',
-        };
-
-        const response = await fetch(this.PISTON_URL, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(pistonPayload),
-          signal: AbortSignal.timeout(30000),
-        });
-
-        if (!response.ok) {
-          throw new Error(`Piston API error: ${response.status}`);
-        }
-
-        const executionTime = Date.now() - executionStartTime;
-        const pistonResult: PistonResponse = await response.json();
-
-        const actualOutput = pistonResult.run.stdout?.trim() || '';
+        const payload = this.prepareExecutionPayload(code, language, testCase.input || '', datasets);
+        const judgeResult = await this.judge0Service.execute(
+          language,
+          payload.sourceCode,
+          payload.stdin,
+        );
+        const executionTime = judgeResult.executionTimeMs || Date.now() - executionStartTime;
+        const actualOutput = judgeResult.stdout?.trim() || '';
         const expectedOutput = testCase.expected_output.trim();
-        const errorMessage = pistonResult.run.stderr || '';
-        const exitCode = pistonResult.run.code;
+        const errorMessage =
+          judgeResult.compileOutput ||
+          judgeResult.stderr ||
+          judgeResult.message ||
+          '';
+        const passed =
+          judgeResult.verdict === 'accepted' &&
+          (!expectedOutput || this.validateOutput(actualOutput, expectedOutput));
 
-        // Validate output (simple string matching for now)
-        const passed = this.validateOutput(actualOutput, expectedOutput);
-
-        results.push({
+        return {
           ...testCase,
           actual_output: actualOutput,
           passed,
           execution_time: executionTime,
-          exit_code: exitCode,
+          exit_code: judgeResult.exitCode,
           error_message: errorMessage,
-        });
+          compile_output: judgeResult.compileOutput,
+          verdict: judgeResult.verdict,
+          status_description: judgeResult.statusDescription,
+          data_delivery: payload.dataDelivery,
+        } as TestCase;
+      }),
+    );
 
-        // Add small delay between executions
-        await new Promise((resolve) => setTimeout(resolve, 100));
-      } catch (error) {
-        console.error(`Error executing test case:`, error);
-        results.push({
-          ...testCase,
-          actual_output: '',
-          passed: false,
-          execution_time: 0,
-          exit_code: -1,
-          error_message: error.message || 'Execution failed',
-        });
-      }
-    }
+    const results: TestCase[] = settled.map((result, i) => {
+      if (result.status === 'fulfilled') return result.value;
+      console.error(`Error executing test case ${i}:`, result.reason);
+      return {
+        ...testCases[i],
+        actual_output: '',
+        passed: false,
+        execution_time: 0,
+        exit_code: -1,
+        error_message: result.reason?.message || 'Execution failed',
+        verdict: 'internal_error',
+      } as TestCase;
+    });
 
     return results;
+  }
+
+  private prepareExecutionPayload(
+    code: string,
+    language: string,
+    stdin: string,
+    datasets: PracticeDataset[] = [],
+  ): {
+    sourceCode: string;
+    stdin: string;
+    dataDelivery: 'stdin' | 'files' | 'inline' | 'none';
+  } {
+    const normalizedLanguage = this.normalizeLanguageCode(language);
+
+    if (normalizedLanguage === 'sql') {
+      const setupCode = this.generateSQLSetup(datasets);
+      return {
+        sourceCode: `${setupCode}\n${code}`,
+        stdin: stdin || '',
+        dataDelivery: setupCode.trim() ? 'inline' : 'none',
+      };
+    }
+
+    if (normalizedLanguage === 'python') {
+      const datasetFiles = this.buildDatasetFiles(datasets);
+      const fileBootstrap = datasetFiles
+        .map(
+          (file) =>
+            `with open(${JSON.stringify(file.name)}, "w", encoding="utf-8") as _dataset_file:\n    _dataset_file.write(${JSON.stringify(file.content)})`,
+        )
+        .join('\n');
+
+      return {
+        sourceCode: `${fileBootstrap ? `${fileBootstrap}\n\n` : ''}${code}`,
+        stdin: stdin || '',
+        dataDelivery: datasetFiles.length > 0 ? 'files' : 'none',
+      };
+    }
+
+    const datasetContract = this.getDatasetHelperContract(datasets);
+    const contractStdin = datasetContract
+      ? `<<<JDS_CONTRACT_JSON>>>\n${JSON.stringify(datasetContract)}\n<<<END_JDS_CONTRACT_JSON>>>\n${stdin || ''}`
+      : stdin || '';
+
+    if (normalizedLanguage === 'javascript' && stdin && !this.javascriptReadsInput(code)) {
+      return {
+        sourceCode: `const input = ${JSON.stringify(stdin)};\n\n${code}`,
+        stdin: contractStdin,
+        dataDelivery: datasetContract ? 'stdin' : 'inline',
+      };
+    }
+
+    return {
+      sourceCode: code,
+      stdin: contractStdin,
+      dataDelivery: datasetContract ? 'stdin' : 'none',
+    };
+  }
+
+  private buildDatasetFiles(datasets: PracticeDataset[]): Array<{ name: string; content: string }> {
+    return datasets
+      .filter((dataset) => ['python', 'statistics'].includes(dataset.subject_type))
+      .map((dataset, index) => {
+        const rawCsv =
+          typeof dataset.schema_info?.dataset_csv_raw === 'string'
+            ? dataset.schema_info.dataset_csv_raw
+            : '';
+        const content = rawCsv || this.rowsToCsvString(dataset.data || []);
+        if (!content.trim()) {
+          return null;
+        }
+        const safeName = String(dataset.name || dataset.table_name || `dataset_${index + 1}`)
+          .replace(/[^a-zA-Z0-9_.-]/g, '_')
+          .replace(/^_+/, '');
+        const fileName = safeName.toLowerCase().endsWith('.csv') ? safeName : `${safeName || 'dataset'}.csv`;
+        return { name: fileName, content };
+      })
+      .filter((file): file is { name: string; content: string } => Boolean(file));
+  }
+
+  private getDatasetHelperContract(datasets: PracticeDataset[]) {
+    if (!datasets.length) {
+      return null;
+    }
+
+    return {
+      version: 1,
+      datasets: datasets.map((dataset) => ({
+        id: dataset.id,
+        name: dataset.name,
+        tableName: dataset.table_name || dataset.name,
+        columns: dataset.columns || dataset.schema_info?.dataset_columns || [],
+        rows: dataset.data || [],
+        recordCount: dataset.record_count ?? dataset.data?.length ?? 0,
+        description: dataset.description || dataset.schema_info?.dataset_description || '',
+      })),
+    };
+  }
+
+  private rowsToCsvString(rows: any[]): string {
+    if (!Array.isArray(rows) || rows.length === 0) {
+      return '';
+    }
+
+    const columns = Object.keys(rows[0] || {});
+    const escapeCsv = (value: any) => {
+      if (value === null || value === undefined) return '';
+      const text = String(value);
+      return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+    };
+
+    return [
+      columns.map(escapeCsv).join(','),
+      ...rows.map((row) => columns.map((column) => escapeCsv(row[column])).join(',')),
+    ].join('\n');
+  }
+
+  private javascriptReadsInput(code: string): boolean {
+    return /\b(fs\.readFileSync|process\.stdin|readline|prompt\s*\(|\binput\b)/.test(code);
+  }
+
+  private normalizeLanguageCode(language: string): string {
+    const value = String(language || '').trim().toLowerCase();
+    if (value === 'py' || value === 'python3') return 'python';
+    if (value === 'c++') return 'cpp';
+    if (value === 'js' || value === 'node' || value === 'nodejs') return 'javascript';
+    if (value === 'statistics') return 'python';
+    return value;
   }
 
   private generateSQLSetup(datasets: PracticeDataset[]): string {
@@ -374,12 +467,18 @@ export class PracticeCodingService {
 
     for (const dataset of datasets) {
       if (dataset.schema_info?.creation_sql) {
-        sql += dataset.schema_info.creation_sql + ';\n\n';
+        sql += `${dataset.schema_info.creation_sql.replace(/;\s*$/, '')};\n`;
+        const alias = dataset.table_name || dataset.name;
+        if (alias && alias !== 'dataset') {
+          sql += `DROP VIEW IF EXISTS dataset;\nCREATE VIEW dataset AS SELECT * FROM ${alias};\n`;
+        }
+        sql += '\n';
       } else if (dataset.data && dataset.data.length > 0) {
         const tableName = dataset.table_name || dataset.name || 'dataset';
         const columns = dataset.columns || Object.keys(dataset.data[0]);
 
         // Create table
+        sql += `DROP TABLE IF EXISTS ${tableName};\n`;
         sql += `CREATE TABLE ${tableName} (${columns.map((c) => `${c} TEXT`).join(', ')});\n`;
 
         // Insert data
@@ -395,11 +494,14 @@ export class PracticeCodingService {
           });
           sql += `INSERT INTO ${tableName} VALUES (${values.join(', ')});\n`;
         }
+        if (tableName !== 'dataset') {
+          sql += `DROP VIEW IF EXISTS dataset;\nCREATE VIEW dataset AS SELECT * FROM ${tableName};\n`;
+        }
         sql += '\n';
       }
     }
 
-    return sql;
+    return sql ? `.headers on\n.mode column\n${sql}` : '';
   }
 
   private generatePythonSetup(datasets: PracticeDataset[]): string {

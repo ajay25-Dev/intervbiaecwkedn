@@ -209,6 +209,8 @@ export class InterviewPracticeExercisesService {
           id: exerciseId,
           name: exerciseData.header_text || 'Practice Exercise',
           description: exerciseData.business_context,
+          subject_category: exerciseData.subject_category || null,
+          solution_coding_language: exerciseData.solution_coding_language || null,
           created_at: new Date().toISOString(),
         });
 
@@ -216,6 +218,12 @@ export class InterviewPracticeExercisesService {
 
       const questions = exerciseData.questions_raw || [];
       const datasets = exerciseData.datasets || [];
+
+      const resolvedLanguage = exerciseData.solution_coding_language
+        || exerciseData.coding_language
+        || exerciseData.type
+        || 'sql';
+      const resolvedCategory = exerciseData.subject_category || null;
 
       for (const question of questions) {
         const questionId = uuidv4();
@@ -226,12 +234,13 @@ export class InterviewPracticeExercisesService {
             exercise_id: exerciseId,
             question_number: question.id,
             text: question.business_question,
-            type: exerciseData.type || 'sql',
-            language: exerciseData.coding_language || 'sql',
+            type: resolvedLanguage,
+            language: resolvedLanguage,
+            subject_category: resolvedCategory,
             difficulty: question.difficulty,
             topics: question.topics || [],
             points: 10,
-            content: question,
+            content: { ...question, subject_category: resolvedCategory },
             expected_output_table: question.expected_output_table,
             created_at: new Date().toISOString(),
           });
@@ -252,22 +261,36 @@ export class InterviewPracticeExercisesService {
         if (answerError) throw answerError;
       }
 
-      if (datasets && datasets.length > 0) {
-        for (const dataset of datasets) {
+      // Always create dataset record when data_creation_sql is present
+      const hasDatasets = datasets && datasets.length > 0;
+      const hasCreationSql = !!exerciseData.data_creation_sql;
+
+      if (hasDatasets || hasCreationSql) {
+        const datasetsToStore = hasDatasets
+          ? datasets
+          : [{ name: exerciseData.dataset_table_name || 'Dataset', table_name: exerciseData.dataset_table_name || null }];
+
+        for (const dataset of datasetsToStore) {
+          const dsId = uuidv4();
           const { error: dsError } = await this.supabase
             .from('interview_practice_datasets')
             .insert({
-              id: uuidv4(),
+              id: dsId,
               exercise_id: exerciseId,
               name: dataset.name || 'Dataset',
               description: exerciseData.dataset_description,
-              table_name: dataset.table_name || 'data',
-              columns: dataset.columns || [],
-              creation_sql: exerciseData.data_creation_sql,
-              creation_python: exerciseData.data_creation_python,
-              csv_data: exerciseData.dataset_csv_raw,
-              record_count: dataset.record_count,
-              subject_type: exerciseData.type || 'sql',
+              table_name: dataset.table_name || exerciseData.dataset_table_name || null,
+              columns: dataset.columns || exerciseData.dataset_columns || [],
+              creation_sql: exerciseData.data_creation_sql || null,
+              creation_python: exerciseData.data_creation_python || null,
+              csv_data: exerciseData.dataset_csv_raw || null,
+              record_count: dataset.record_count || null,
+              subject_type: resolvedLanguage,
+              schema_info: {
+                creation_sql: exerciseData.data_creation_sql || null,
+                dataset_csv_raw: exerciseData.dataset_csv_raw || null,
+                dataset_columns: exerciseData.dataset_columns || dataset.columns || [],
+              },
               created_at: new Date().toISOString(),
             });
 

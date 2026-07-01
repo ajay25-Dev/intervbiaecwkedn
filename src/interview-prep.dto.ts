@@ -360,6 +360,14 @@ export class GeneratePracticeExercisesDto {
 
   @IsNumber()
   @IsOptional()
+  batch_size?: number;
+
+  @IsString()
+  @IsOptional()
+  exercise_id?: string;
+
+  @IsNumber()
+  @IsOptional()
   plan_id?: number;
 }
 

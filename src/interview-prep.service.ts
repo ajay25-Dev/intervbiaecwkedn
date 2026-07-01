@@ -31,6 +31,7 @@ type PracticeGenerationOverrides = {
   topicHierarchy?: string;
   futureTopics?: string[];
   questionCount?: number;
+  previousQuestionsContext?: string[];
 };
 import { FileExtractionService } from './file-extraction.service';
 
@@ -40,41 +41,52 @@ export class InterviewPrepService {
   private aiServiceUrl: string;
   private static SUBJECT_TOPIC_MAP: Record<
     string,
-    { topic: string; topicHierarchy: string }
+    Record<'Beginner' | 'Intermediate' | 'Advanced', { topic: string; topicHierarchy: string }>
   > = {
-    SQL: { topic: 'Joins', topicHierarchy: 'Select, Where, Group By, Having' },
+    SQL: {
+      Beginner:     { topic: 'Basic Queries',          topicHierarchy: 'Select, Where, Order By, Limit, Basic Aggregations' },
+      Intermediate: { topic: 'Joins & Aggregations',   topicHierarchy: 'Select, Where, Group By, Having, Joins, Subqueries' },
+      Advanced:     { topic: 'Window Functions & CTEs', topicHierarchy: 'Joins, Subqueries, CTEs, Window Functions, Query Optimisation, Indexing' },
+    },
     Python: {
-      topic: 'Data Frames',
-      topicHierarchy: 'Variables, Functions, Pandas, Plotting',
+      Beginner:     { topic: 'Data Basics',            topicHierarchy: 'Variables, Data Types, Functions, Loops, Lists, Basic Pandas' },
+      Intermediate: { topic: 'Data Frames',            topicHierarchy: 'Variables, Functions, Pandas, Matplotlib, GroupBy, Merging' },
+      Advanced:     { topic: 'Advanced Analytics',     topicHierarchy: 'Pandas, NumPy, Matplotlib, Scikit-learn, APIs, Performance Optimisation' },
     },
     'Power BI': {
-      topic: 'Reporting',
-      topicHierarchy: 'Data Modeling, DAX, Visualizations, Publishing',
+      Beginner:     { topic: 'Basic Reports',          topicHierarchy: 'Data Import, Basic Visuals, Filters, Slicers, Simple DAX' },
+      Intermediate: { topic: 'Reporting & DAX',        topicHierarchy: 'Data Modeling, DAX Measures, Relationships, Visualizations' },
+      Advanced:     { topic: 'Advanced Modeling',      topicHierarchy: 'DAX, Row Context, Filter Context, Star Schema, Row-Level Security, Publishing' },
     },
     Statistics: {
-      topic: 'Probability Distributions',
-      topicHierarchy: 'Summary Stats, Distributions, Hypothesis Testing',
+      Beginner:     { topic: 'Descriptive Statistics', topicHierarchy: 'Mean, Median, Mode, Variance, Standard Deviation, Distributions' },
+      Intermediate: { topic: 'Inferential Statistics', topicHierarchy: 'Summary Stats, Distributions, Hypothesis Testing, p-value, Confidence Intervals' },
+      Advanced:     { topic: 'Advanced Analytics',     topicHierarchy: 'Regression, ANOVA, Chi-Square, Bayesian Thinking, A/B Testing, Model Evaluation' },
     },
     Excel: {
-      topic: 'Spreadsheet formulas and analysis',
-      topicHierarchy:
-        'Formulas, Pivot tables, Lookups, Data cleaning, Analysis',
+      Beginner:     { topic: 'Core Formulas',          topicHierarchy: 'SUM, AVERAGE, IF, VLOOKUP, Basic Pivot Tables, Sorting, Filtering' },
+      Intermediate: { topic: 'Data Analysis',          topicHierarchy: 'Formulas, Pivot Tables, VLOOKUP, HLOOKUP, Conditional Formatting, Charts' },
+      Advanced:     { topic: 'Advanced Excel',         topicHierarchy: 'INDEX-MATCH, Array Formulas, Power Query, Macros, Dynamic Dashboards, Pivot Charts' },
     },
     'Problem Solving': {
-      topic: 'Structured reasoning',
-      topicHierarchy: 'Case framing, Assumptions, Hypothesis, Recommendations',
+      Beginner:     { topic: 'Structured Thinking',    topicHierarchy: 'Problem Definition, Assumptions, Simple Frameworks, Recommendations' },
+      Intermediate: { topic: 'Case Frameworks',        topicHierarchy: 'Case Framing, Assumptions, Hypothesis, Root Cause Analysis, Recommendations' },
+      Advanced:     { topic: 'Strategic Reasoning',    topicHierarchy: 'MECE, Issue Trees, Business Acumen, Trade-off Analysis, Executive Recommendations' },
     },
     Communication: {
-      topic: 'Storytelling',
-      topicHierarchy: 'Narrative, Visuals, Recommendations',
+      Beginner:     { topic: 'Clear Communication',    topicHierarchy: 'Clarity, Structure, Simple Visuals, Audience Awareness' },
+      Intermediate: { topic: 'Data Storytelling',      topicHierarchy: 'Narrative, Visuals, Insight Delivery, Stakeholder Communication' },
+      Advanced:     { topic: 'Executive Storytelling', topicHierarchy: 'Executive Summaries, Persuasion, Conflict Resolution, Data-driven Narratives' },
     },
     'Case Studies': {
-      topic: 'Problem Framing',
-      topicHierarchy: 'Context, Objective, Metrics, Recommendations',
+      Beginner:     { topic: 'Case Basics',            topicHierarchy: 'Context Understanding, Objective Setting, Basic Metrics, Simple Recommendations' },
+      Intermediate: { topic: 'Business Case Analysis', topicHierarchy: 'Context, Objective, Metrics, Root Cause, Recommendations' },
+      Advanced:     { topic: 'End-to-End Case Design', topicHierarchy: 'Scoping, KPI Design, Root Cause Analysis, Segmentation, Strategic Recommendations' },
     },
     'Domain Knowledge': {
-      topic: 'Domain Awareness',
-      topicHierarchy: 'Company Overview, KPIs, Use Cases, Resume Tips',
+      Beginner:     { topic: 'Company & Industry Basics', topicHierarchy: 'Company Overview, Industry, Business Model, Key KPIs' },
+      Intermediate: { topic: 'Domain Awareness',          topicHierarchy: 'Company Overview, KPIs, Use Cases, Industry Trends, Resume Tips' },
+      Advanced:     { topic: 'Strategic Domain Depth',    topicHierarchy: 'Competitive Landscape, Business Strategy, KPI Trees, Industry Challenges, Growth Levers' },
     },
   };
 
@@ -110,7 +122,7 @@ export class InterviewPrepService {
       if (error) throw error;
       return data?.[0] || null;
     } catch (error) {
-      throw new BadRequestException(`Failed to save profile: ${error.message}`);
+      throw new BadRequestException(`Failed to save profile: ${(error instanceof Error ? error.message : String(error))}`);
     }
   }
 
@@ -126,7 +138,7 @@ export class InterviewPrepService {
       return data || null;
     } catch (error) {
       throw new BadRequestException(
-        `Failed to fetch profile: ${error.message}`,
+        `Failed to fetch profile: ${(error instanceof Error ? error.message : String(error))}`,
       );
     }
   }
@@ -150,7 +162,7 @@ export class InterviewPrepService {
       if (error) throw error;
       return data?.[0] || null;
     } catch (error) {
-      throw new BadRequestException(`Failed to upload JD: ${error.message}`);
+      throw new BadRequestException(`Failed to upload JD: ${(error instanceof Error ? error.message : String(error))}`);
     }
   }
 
@@ -211,7 +223,7 @@ export class InterviewPrepService {
       if (error instanceof BadRequestException) {
         throw error;
       }
-      throw new BadRequestException(`Failed to upload JD: ${error.message}`);
+      throw new BadRequestException(`Failed to upload JD: ${(error instanceof Error ? error.message : String(error))}`);
     } finally {
       this.fileExtractionService.cleanupFile(filePath);
     }
@@ -268,7 +280,7 @@ export class InterviewPrepService {
     } catch (error) {
       console.error('[analyzeJobDescription] Error:', error);
       throw new BadRequestException(
-        `Failed to analyze job description: ${error.message}`,
+        `Failed to analyze job description: ${(error instanceof Error ? error.message : String(error))}`,
       );
     }
   }
@@ -291,19 +303,59 @@ export class InterviewPrepService {
 
       return data;
     } catch (error) {
-      throw new BadRequestException(`Failed to fetch JD: ${error.message}`);
+      throw new BadRequestException(`Failed to fetch JD: ${(error instanceof Error ? error.message : String(error))}`);
     }
   }
 
-  private getPlanTopicInfo(subject: string) {
+  private getPlanTopicInfo(
+    subject: string,
+    level: 'Beginner' | 'Intermediate' | 'Advanced' = 'Intermediate',
+  ) {
     const trimmed = this.normalizeSubjectLabel(subject);
     const key = trimmed || 'SQL';
-    return (
-      InterviewPrepService.SUBJECT_TOPIC_MAP[key] || {
-        topic: trimmed || 'General',
-        topicHierarchy: trimmed || 'General',
+    const levelMap = InterviewPrepService.SUBJECT_TOPIC_MAP[key];
+    if (levelMap) return levelMap[level];
+    return { topic: trimmed || 'General', topicHierarchy: trimmed || 'General' };
+  }
+
+  private async resolveDynamicTopicInfo(
+    subject: string,
+    learnerDifficulty: 'Beginner' | 'Intermediate' | 'Advanced',
+    jdData: { job_description?: string },
+    profileData: { experience_level?: string; target_role?: string; company_name?: string },
+  ): Promise<{ topic: string; topicHierarchy: string }> {
+    try {
+      const _t0 = Date.now();
+      const response = await fetch(`${this.aiServiceUrl}/interview/topic-hierarchy`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          subject,
+          years_of_experience: profileData.experience_level || null,
+          experience_level: learnerDifficulty.toLowerCase(),
+          role_title: profileData.target_role || null,
+          job_description: jdData.job_description
+            ? jdData.job_description.substring(0, 1500)
+            : null,
+        }),
+        signal: AbortSignal.timeout(12000),
+      });
+
+      if (response.ok) {
+        const data = (await response.json()) as { topic: string; topic_hierarchy: string };
+        console.log(
+          `[topic-hierarchy] ${subject} → "${data.topic}" in ${Date.now() - _t0}ms`,
+        );
+        return { topic: data.topic, topicHierarchy: data.topic_hierarchy };
       }
-    );
+    } catch (err) {
+      console.warn(
+        `[topic-hierarchy] Fallback for ${subject}:`,
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+    // Fallback to static map
+    return this.getPlanTopicInfo(subject, learnerDifficulty);
   }
 
   private getSubjectPrepTimeoutMs(
@@ -377,7 +429,13 @@ export class InterviewPrepService {
       overrides.learnerLevel,
       profileData.experience_level,
     );
-    const topicInfo = this.getPlanTopicInfo(subject);
+    // Dynamically resolve topic + topic_hierarchy via GPT based on actual JD experience
+    const topicInfo = await this.resolveDynamicTopicInfo(
+      subject,
+      learnerDifficulty,
+      jdData,
+      profileData,
+    );
     const isProblemSolving = this.isProblemSolvingSubject(subject);
     const timeoutMs = this.getSubjectPrepTimeoutMs(subject, 220000);
     const controller = new AbortController();
@@ -894,7 +952,7 @@ export class InterviewPrepService {
       return (savedPlan as InterviewPlanResponse) || null;
     } catch (error) {
       throw new BadRequestException(
-        `Failed to generate interview plan: ${error.message}`,
+        `Failed to generate interview plan: ${(error instanceof Error ? error.message : String(error))}`,
       );
     }
   }
@@ -1024,7 +1082,7 @@ export class InterviewPrepService {
       return await response.json();
     } catch (error) {
       throw new BadRequestException(
-        `Failed to generate interview questions: ${error.message}`,
+        `Failed to generate interview questions: ${(error instanceof Error ? error.message : String(error))}`,
       );
     }
   }
@@ -1523,7 +1581,7 @@ export class InterviewPrepService {
       return data?.[0] || null;
     } catch (error) {
       throw new BadRequestException(
-        `Failed to fetch latest plan: ${error.message}`,
+        `Failed to fetch latest plan: ${(error instanceof Error ? error.message : String(error))}`,
       );
     }
   }
@@ -1539,7 +1597,7 @@ export class InterviewPrepService {
       if (error) throw error;
       return data || [];
     } catch (error) {
-      throw new BadRequestException(`Failed to fetch JDs: ${error.message}`);
+      throw new BadRequestException(`Failed to fetch JDs: ${(error instanceof Error ? error.message : String(error))}`);
     }
   }
 
@@ -1596,7 +1654,7 @@ export class InterviewPrepService {
     } catch (error) {
       console.error('[extractJDInfo] Error:', error);
       throw new BadRequestException(
-        `Failed to extract JD info: ${error.message}`,
+        `Failed to extract JD info: ${(error instanceof Error ? error.message : String(error))}`,
       );
     }
   }
@@ -1694,7 +1752,7 @@ export class InterviewPrepService {
     } catch (error) {
       console.error('[generateDomainKPI] Error:', error);
       throw new BadRequestException(
-        `Failed to generate domain KPI: ${error.message}`,
+        `Failed to generate domain KPI: ${(error instanceof Error ? error.message : String(error))}`,
       );
     }
   }
@@ -1715,6 +1773,8 @@ export class InterviewPrepService {
         topic_hierarchy,
         future_topics,
         question_count,
+        batch_size,
+        exercise_id,
         plan_id,
       } = dto;
 
@@ -1752,9 +1812,18 @@ export class InterviewPrepService {
       }
 
       const parsedQuestionCount = Number(question_count);
-      const resolvedQuestionCount = Number.isFinite(parsedQuestionCount)
+      const requestedQuestionCount = Number.isFinite(parsedQuestionCount)
         ? Math.max(1, Math.trunc(parsedQuestionCount))
         : 8;
+      const parsedBatchSize = Number(batch_size);
+      const requestedBatchSize = Number.isFinite(parsedBatchSize)
+        ? Math.max(1, Math.trunc(parsedBatchSize))
+        : Math.min(5, requestedQuestionCount);
+      const resolvedBatchSize = Math.min(
+        requestedQuestionCount,
+        requestedBatchSize,
+      );
+      const appendMode = Boolean(exercise_id);
 
       const overrides: PracticeGenerationOverrides = {
         domain,
@@ -1762,17 +1831,148 @@ export class InterviewPrepService {
         topic,
         topicHierarchy: topic_hierarchy,
         futureTopics: future_topics,
-        questionCount: resolvedQuestionCount,
+        questionCount: resolvedBatchSize,
       };
 
       for (const subject of subjectsToGenerate) {
         try {
+          let previousQuestionsContext: string[] | undefined;
+          let existingExerciseId = exercise_id || undefined;
+          let effectiveBatchSize = resolvedBatchSize;
+          if (appendMode && existingExerciseId) {
+            const { data: existingExercise, error: existingExerciseError } =
+              await this.supabase
+                .from('interview_practice_exercises')
+                .select('id')
+                .eq('id', existingExerciseId)
+                .eq('user_id', userId)
+                .maybeSingle();
+            if (existingExerciseError) {
+              console.error(
+                `[generatePracticeExercises] Failed to load existing exercise ${existingExerciseId}:`,
+                existingExerciseError,
+              );
+            }
+            if (!existingExercise) {
+              existingExerciseId = undefined;
+            } else {
+              const { data: existingQuestions } = await this.supabase
+                .from('interview_practice_questions')
+                .select('text, content, question_number')
+                .eq('exercise_id', existingExerciseId)
+                .order('question_number', { ascending: true });
+              previousQuestionsContext = (existingQuestions || [])
+                .map((row: any) => {
+                  const content = row?.content;
+                  const questionText =
+                    (typeof row?.text === 'string' && row.text.trim()) ||
+                    (typeof content?.question === 'string' && content.question.trim()) ||
+                    '';
+                  return questionText;
+                })
+                .filter((value: string) => value.length > 0);
+              const existingQuestionCount = (existingQuestions || []).length;
+              const remainingQuestionCount = Math.max(
+                0,
+                requestedQuestionCount - existingQuestionCount,
+              );
+              if (remainingQuestionCount === 0) {
+                continue;
+              }
+              effectiveBatchSize = Math.min(
+                resolvedBatchSize,
+                remainingQuestionCount,
+              );
+            }
+          }
+
           const exerciseData = await this.generateSingleSubjectExercise(
             subject,
             profileData,
             jdData,
-            overrides,
+            {
+              ...overrides,
+              questionCount: effectiveBatchSize,
+              previousQuestionsContext,
+            },
           );
+
+          if (appendMode && existingExerciseId) {
+            let currentQuestionNumber = 1;
+            const { data: existingQuestionRows } = await this.supabase
+              .from('interview_practice_questions')
+              .select('question_number')
+              .eq('exercise_id', existingExerciseId)
+              .order('question_number', { ascending: false })
+              .limit(1);
+            const existingQuestionNumber = Number(
+              existingQuestionRows?.[0]?.question_number,
+            );
+            if (Number.isFinite(existingQuestionNumber) && existingQuestionNumber > 0) {
+              currentQuestionNumber = existingQuestionNumber + 1;
+            }
+
+            const appendResult: MigrationResult = {
+              plan_id: plan_id || 0,
+              exercises_created: 0,
+              questions_created: 0,
+              datasets_created: 0,
+              answers_created: 0,
+              errors: [],
+              warnings: [],
+            };
+
+            const normalizedQuestions = Array.isArray(exerciseData.questions)
+              ? exerciseData.questions
+              : [];
+            for (let i = 0; i < normalizedQuestions.length; i += 1) {
+              const question = normalizedQuestions[i];
+              await this.processQuestion(
+                existingExerciseId,
+                null,
+                {
+                  question:
+                    question.text || question.question || question.business_question,
+                  expected_approach: question.hint || question.adaptive_note,
+                  sample_output:
+                    question.expected_answer || question.answer || '',
+                  difficulty: question.difficulty,
+                  topics: question.topics,
+                  answer: question.answer || question.expected_answer || '',
+                  business_context:
+                    question.business_context || exerciseData.dataset_description,
+                  case_study_context: question.case_study_context,
+                  expected_output_table: question.expected_output_table,
+                },
+                subject,
+                currentQuestionNumber + i,
+                appendResult,
+                {
+                  business_context:
+                    exerciseData.dataset_description ||
+                    exerciseData.business_context ||
+                    profileData.company_name ||
+                    subject,
+                  case_studies: [],
+                  dataset_description: exerciseData.dataset_description,
+                },
+              );
+            }
+
+            exercisesResults.push({
+              id: existingExerciseId,
+              profile_id,
+              jd_id,
+              subject,
+              questions: normalizedQuestions,
+              dataset_description: exerciseData.dataset_description,
+              data_creation_sql: exerciseData.data_creation_sql,
+              data_creation_python: exerciseData.data_creation_python,
+              dataset_csv: exerciseData.dataset_csv_raw,
+              created_at: new Date().toISOString(),
+            });
+            continue;
+          }
 
           // Store in database
           const exercisePayload = {
@@ -1781,7 +1981,11 @@ export class InterviewPrepService {
             profile_id,
             jd_id,
             subject,
-            exercise_content: exerciseData,
+            exercise_content: {
+              ...exerciseData,
+              question_count: requestedQuestionCount,
+              generated_question_count: (exerciseData.questions || []).length,
+            },
             created_at: new Date().toISOString(),
           };
           const { data: storedExercise, error: storeError } =
@@ -1817,7 +2021,10 @@ export class InterviewPrepService {
                 ? { ...exerciseData.plan_subject_data }
                 : {};
             planData.subject = subject;
-            planData.question_count = resolvedQuestionCount;
+            planData.question_count = requestedQuestionCount;
+            planData.question_count_per_subject = requestedQuestionCount;
+            planData.requested_question_count = requestedQuestionCount;
+            planData.generated_question_count = (exerciseData.questions || []).length;
             planData.generation_status = 'ready';
             planData.generation_error = null;
             planData.generation_updated_at = new Date().toISOString();
@@ -1833,14 +2040,18 @@ export class InterviewPrepService {
               'failed',
               {
                 generation_error:
-                  error instanceof Error ? error.message : String(error),
+                  error instanceof Error ? (error instanceof Error ? error.message : String(error)) : String(error),
               },
             );
           }
         }
       }
 
-      if (plan_id && Object.keys(accumulatedPlanSubjectData).length > 0) {
+      if (
+        plan_id &&
+        Object.keys(accumulatedPlanSubjectData).length > 0 &&
+        !appendMode
+      ) {
         try {
           await this.upsertPlanSubjectPrep(
             userId,
@@ -1869,7 +2080,7 @@ export class InterviewPrepService {
       return exercisesResults;
     } catch (error) {
       throw new BadRequestException(
-        `Failed to generate practice exercises: ${error.message}`,
+        `Failed to generate practice exercises: ${(error instanceof Error ? error.message : String(error))}`,
       );
     }
   }
@@ -1916,7 +2127,7 @@ export class InterviewPrepService {
       });
     } catch (error) {
       throw new BadRequestException(
-        `Failed to regenerate subject ${subject}: ${error.message}`,
+        `Failed to regenerate subject ${subject}: ${(error instanceof Error ? error.message : String(error))}`,
       );
     }
   }
@@ -2226,6 +2437,7 @@ export class InterviewPrepService {
       dataset_creation_coding_language: datasetLanguage,
       total_questions: resolvedQuestionCount,
       verify_locally: false,
+      previous_questions_context: overrides.previousQuestionsContext || [],
     };
 
     const timeoutMs = this.getSubjectPrepTimeoutMs(
@@ -2452,7 +2664,7 @@ export class InterviewPrepService {
             dto.overwrite_existing ?? false,
           );
         } catch (error) {
-          const errorMsg = `Failed to process subject ${subject}: ${error.message}`;
+          const errorMsg = `Failed to process subject ${subject}: ${(error instanceof Error ? error.message : String(error))}`;
           result.errors.push(errorMsg);
           console.error(errorMsg);
         }
@@ -2473,7 +2685,7 @@ export class InterviewPrepService {
     } catch (error) {
       return {
         success: false,
-        message: `Migration failed: ${error.message}`,
+        message: `Migration failed: ${(error instanceof Error ? error.message : String(error))}`,
         result,
       };
     }
@@ -2908,7 +3120,7 @@ export class InterviewPrepService {
       }
     } catch (error) {
       result.errors.push(
-        `Error deleting existing exercise data: ${error.message}`,
+        `Error deleting existing exercise data: ${(error instanceof Error ? error.message : String(error))}`,
       );
     }
   }
