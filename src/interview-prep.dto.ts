@@ -226,6 +226,7 @@ export class ExtractJDDto {
 
 export class ExtractJDResponse {
   role_title: string;
+  industry?: IndustryType;
   key_skills: string[];
   domains: string[];
   suggested_subjects: string[];

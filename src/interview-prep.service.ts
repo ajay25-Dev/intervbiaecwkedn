@@ -32,6 +32,7 @@ type PracticeGenerationOverrides = {
   futureTopics?: string[];
   questionCount?: number;
   previousQuestionsContext?: string[];
+  domainKnowledgeDetail?: 'summary' | 'full';
 };
 import { FileExtractionService } from './file-extraction.service';
 
@@ -327,6 +328,11 @@ export class InterviewPrepService {
     return { topic: trimmed || 'General', topicHierarchy: trimmed || 'General' };
   }
 
+  private canUseStaticTopicInfo(subject: string): boolean {
+    const normalizedSubject = this.normalizeSubjectLabel(subject);
+    return Boolean(InterviewPrepService.SUBJECT_TOPIC_MAP[normalizedSubject]);
+  }
+
   private async resolveDynamicTopicInfo(
     subject: string,
     learnerDifficulty: 'Beginner' | 'Intermediate' | 'Advanced',
@@ -334,6 +340,15 @@ export class InterviewPrepService {
     profileData: { experience_level?: string; target_role?: string; company_name?: string },
   ): Promise<{ topic: string; topicHierarchy: string }> {
     const startedAt = Date.now();
+    if (this.canUseStaticTopicInfo(subject)) {
+      const staticTopicInfo = this.getPlanTopicInfo(subject, learnerDifficulty);
+      this.logTiming(
+        'interview.topic-hierarchy',
+        startedAt,
+        `subject="${subject}" status=static topic="${staticTopicInfo.topic}"`,
+      );
+      return staticTopicInfo;
+    }
     try {
       const _t0 = Date.now();
       const response = await fetch(`${this.aiServiceUrl}/interview/topic-hierarchy`, {
@@ -419,6 +434,20 @@ export class InterviewPrepService {
       generation_updated_at: new Date().toISOString(),
       ...details,
     };
+  }
+
+  private selectPlanWarmupSubjects(subjects: string[]): string[] {
+    if (subjects.length === 0) {
+      return [];
+    }
+
+    const preferredPracticeSubject = subjects.find(
+      (subject) =>
+        !this.isDomainKnowledgeSubject(subject) &&
+        !this.isProblemSolvingSubject(subject),
+    );
+
+    return preferredPracticeSubject ? [preferredPracticeSubject] : [];
   }
 
   private async setPlanSubjectPrepStatus(
@@ -655,6 +684,9 @@ export class InterviewPrepService {
           jdData?.job_description?.company_name?.trim() ||
           profileData?.industry?.trim() ||
           'Company';
+        const domainKnowledgeDetail =
+          overrides.domainKnowledgeDetail || 'full';
+        const targetKpiCount = domainKnowledgeDetail === 'summary' ? 6 : 12;
         const controller = new AbortController();
         const timeoutMs = this.getSubjectPrepTimeoutMs(
           subject,
@@ -680,6 +712,8 @@ export class InterviewPrepService {
                   profileData?.role_title?.trim() ||
                   'Data Analyst',
                 business_function: 'Analytics',
+                detail_level: domainKnowledgeDetail,
+                target_kpi_count: targetKpiCount,
               }),
               signal: controller.signal,
             },
@@ -896,14 +930,16 @@ export class InterviewPrepService {
           );
           return [
             subject,
-            {
-              ...data,
-              subject,
-              header_text: `${companyNameValue} Domain Knowledge`,
-              domain_knowledge_text: domainKnowledgeText,
-              generation_status: 'ready',
-              generation_error: null,
-              generation_updated_at: new Date().toISOString(),
+              {
+                ...data,
+                subject,
+                header_text: `${companyNameValue} Domain Knowledge`,
+                domain_knowledge_text: domainKnowledgeText,
+                domain_knowledge_detail: domainKnowledgeDetail,
+                generated_kpi_count: kpis.length,
+                generation_status: 'ready',
+                generation_error: null,
+                generation_updated_at: new Date().toISOString(),
             },
           ] as const;
         } catch (error) {
@@ -1118,11 +1154,23 @@ export class InterviewPrepService {
           (subject) => subject.toLowerCase() !== 'domain knowledge',
         ),
       ];
+      const warmupSubjects = new Set(
+        this.selectPlanWarmupSubjects(orderedSubjects),
+      );
       const subjectPrepMap = new Map<string, Record<string, unknown>>();
       orderedSubjects.forEach((subject) => {
+        const isDomainKnowledge = this.isDomainKnowledgeSubject(subject);
+        const isWarmupSubject = warmupSubjects.has(subject);
         subjectPrepMap.set(
           subject,
-          this.createSubjectPrepStatus(subject, 'in_progress'),
+          this.createSubjectPrepStatus(subject, 'in_progress', {
+            generation_mode: isDomainKnowledge
+              ? 'domain_background'
+              : isWarmupSubject
+                ? 'background'
+                : 'lazy',
+            generation_error: null,
+          }),
         );
       });
 
@@ -1209,12 +1257,19 @@ export class InterviewPrepService {
         typeof questionCount === 'number' && questionCount > 0
           ? Math.max(1, Math.trunc(questionCount))
           : 8;
-      const backgroundQuestionCount = Math.min(resolvedQuestionCount, 5);
-      const backgroundSubjects = subjects;
+      const backgroundQuestionCount = Math.min(resolvedQuestionCount, 4);
+      const backgroundSubjects = subjects.filter(
+        (subject) =>
+          !this.isDomainKnowledgeSubject(subject) &&
+          !this.isProblemSolvingSubject(subject),
+      );
       const pendingSubjects = backgroundSubjects.filter((subject) => {
         const existingStatus = subjectPrepMap.get(subject)?.generation_status;
         return existingStatus !== 'ready';
       });
+      const domainKnowledgeSubject = subjects.find((subject) =>
+        this.isDomainKnowledgeSubject(subject),
+      );
       const maxConcurrent = Math.min(2, pendingSubjects.length || 1);
       let nextIndex = 0;
 
@@ -1247,6 +1302,7 @@ export class InterviewPrepService {
               {
                 generation_error:
                   'Timed out or failed during background generation',
+                generation_mode: 'background',
               },
             );
             continue;
@@ -1256,6 +1312,7 @@ export class InterviewPrepService {
             ...generated[1],
             subject: generated[0],
             generation_status: 'ready',
+            generation_mode: 'background',
             generation_updated_at: new Date().toISOString(),
           };
           subjectPrepMap.set(generated[0], readySubjectData);
@@ -1265,9 +1322,118 @@ export class InterviewPrepService {
         }
       };
 
-      await Promise.all(
-        Array.from({ length: maxConcurrent }, () => worker()),
-      );
+      const backgroundWork: Promise<unknown>[] = [];
+      if (pendingSubjects.length > 0) {
+        backgroundWork.push(
+          Promise.all(Array.from({ length: maxConcurrent }, () => worker())),
+        );
+      }
+
+      if (domainKnowledgeSubject) {
+        backgroundWork.push(
+          (async () => {
+            const subjectStartedAt = Date.now();
+            const summaryGenerated = await this.generateSingleSubjectPrep(
+              domainKnowledgeSubject,
+              {
+                ...profileData,
+              },
+              {
+                ...jdData,
+              },
+              {
+                learnerLevel: undefined,
+                questionCount: backgroundQuestionCount,
+                domainKnowledgeDetail: 'summary',
+              },
+            );
+
+            this.logTiming(
+              'interview.plan.domain-background-subject',
+              subjectStartedAt,
+              `planId=${planId} subject="${domainKnowledgeSubject}" stage=summary status=${summaryGenerated ? 'ok' : 'failed'}`,
+            );
+
+            if (!summaryGenerated) {
+              await this.setPlanSubjectPrepStatus(
+                userId,
+                planId,
+                domainKnowledgeSubject,
+                'failed',
+                {
+                  generation_error:
+                    'Timed out or failed during domain background generation',
+                  generation_mode: 'domain_background',
+                },
+              );
+              return;
+            }
+
+            const summarySubjectData = {
+              ...summaryGenerated[1],
+              subject: summaryGenerated[0],
+              generation_status: 'in_progress',
+              generation_mode: 'domain_background',
+              generation_error: null,
+              generation_updated_at: new Date().toISOString(),
+            };
+            subjectPrepMap.set(summaryGenerated[0], summarySubjectData);
+            await this.upsertPlanSubjectPrep(userId, planId, {
+              [summaryGenerated[0]]: summarySubjectData,
+            });
+
+            const fullStartedAt = Date.now();
+            const fullGenerated = await this.generateSingleSubjectPrep(
+              domainKnowledgeSubject,
+              {
+                ...profileData,
+              },
+              {
+                ...jdData,
+              },
+              {
+                learnerLevel: undefined,
+                questionCount: backgroundQuestionCount,
+                domainKnowledgeDetail: 'full',
+              },
+            );
+
+            this.logTiming(
+              'interview.plan.domain-background-subject',
+              fullStartedAt,
+              `planId=${planId} subject="${domainKnowledgeSubject}" stage=full status=${fullGenerated ? 'ok' : 'failed'}`,
+            );
+
+            if (!fullGenerated) {
+              await this.upsertPlanSubjectPrep(userId, planId, {
+                [domainKnowledgeSubject]: {
+                  ...summarySubjectData,
+                  generation_status: 'ready',
+                  generation_error:
+                    'Deep domain enrichment failed, but the summary is available.',
+                  generation_updated_at: new Date().toISOString(),
+                },
+              });
+              return;
+            }
+
+            const readySubjectData = {
+              ...fullGenerated[1],
+              subject: fullGenerated[0],
+              generation_status: 'ready',
+              generation_mode: 'domain_background',
+              generation_error: null,
+              generation_updated_at: new Date().toISOString(),
+            };
+            subjectPrepMap.set(fullGenerated[0], readySubjectData);
+            await this.upsertPlanSubjectPrep(userId, planId, {
+              [fullGenerated[0]]: readySubjectData,
+            });
+          })(),
+        );
+      }
+
+      await Promise.all(backgroundWork);
 
       const migrationStartedAt = Date.now();
       const migrationResult = await this.migratePlanDataToTables(userId, {
@@ -1875,6 +2041,7 @@ export class InterviewPrepService {
         company_name: dto.company_name,
         role: dto.role,
         user_skills: dto.user_skills,
+        industry: dto.industry,
       };
       console.log(
         `[extractJDInfo] Calling ${this.aiServiceUrl}/interview/extract-jd`,
@@ -1937,6 +2104,7 @@ export class InterviewPrepService {
     }
     const industryValue =
       dto.industry ||
+      extracted.industry ||
       (Array.isArray(extracted.domains) && extracted.domains[0]);
     if (industryValue) {
       updates.industry = industryValue;
@@ -2288,6 +2456,7 @@ export class InterviewPrepService {
             planData.requested_question_count = requestedQuestionCount;
             planData.generated_question_count = (exerciseData.questions || []).length;
             planData.generation_status = 'ready';
+            planData.generation_mode = 'on_demand';
             planData.generation_error = null;
             planData.generation_updated_at = new Date().toISOString();
             accumulatedPlanSubjectData[subject] = planData;
@@ -2301,6 +2470,7 @@ export class InterviewPrepService {
               subject,
               'failed',
               {
+                generation_mode: 'on_demand',
                 generation_error:
                   error instanceof Error ? (error instanceof Error ? error.message : String(error)) : String(error),
               },
@@ -2353,6 +2523,17 @@ export class InterviewPrepService {
     subject: string,
   ): Promise<PracticeExerciseResponse[]> {
     try {
+      await this.setPlanSubjectPrepStatus(
+        userId,
+        planId,
+        subject,
+        'in_progress',
+        {
+          generation_mode: 'on_demand',
+          generation_error: null,
+        },
+      );
+
       const { data: plan, error: planError } = await this.supabase
         .from('interview_prep_plans')
         .select('profile_id, jd_id, plan_content')
@@ -2518,6 +2699,10 @@ export class InterviewPrepService {
 
   private isProblemSolvingSubject(subject: string): boolean {
     return this.normalizeSubjectKey(subject) === 'problem solving';
+  }
+
+  private isDomainKnowledgeSubject(subject: string): boolean {
+    return this.normalizeSubjectKey(subject) === 'domain knowledge';
   }
 
   private isCodingPracticeSubject(subject: string): boolean {
