@@ -1774,6 +1774,7 @@ export class InterviewPrepService {
       });
 
       const subjects = Array.from(accumulator.values()).map((summary) => {
+        const attempted = summary.attemptedQuestions;
         const completionPercentage =
           summary.questionCount > 0
             ? Number(
@@ -1784,15 +1785,14 @@ export class InterviewPrepService {
               )
             : 0;
         const accuracyPercentage =
-          summary.questionCount > 0
+          attempted > 0
             ? Number(
                 (
-                  (summary.correctQuestions / summary.questionCount) *
+                  (summary.correctQuestions / attempted) *
                   100
                 ).toFixed(1),
               )
             : 0;
-        const attempted = summary.attemptedQuestions;
         const wrongCount = Math.max(
           summary.submissionAttempts - summary.correctQuestions,
           0,
@@ -1830,6 +1830,10 @@ export class InterviewPrepService {
         (total, subject) => total + subject.correctQuestions,
         0,
       );
+      const attemptedQuestions = subjects.reduce(
+        (total, subject) => total + subject.attemptedQuestions,
+        0,
+      );
       const completionPercentage =
         totalQuestions > 0
           ? Number(((completedQuestions / totalQuestions) * 100).toFixed(1))
@@ -1851,6 +1855,7 @@ export class InterviewPrepService {
           totalQuestions,
           completedQuestions,
           correctQuestions,
+          attemptedQuestions,
           completionPercentage,
           finalScore,
           lastActivityAt,
@@ -2920,7 +2925,7 @@ export class InterviewPrepService {
     const mapping: Record<string, string> = {
       SQL: 'SQL',
       Python: 'Python',
-      'Power BI': 'SQL',
+      'Power BI': 'power_bi',
       Excel: 'Excel',
       Statistics: 'Python',
       Communication: 'English',
@@ -2964,6 +2969,9 @@ export class InterviewPrepService {
     }
     if (normalized === 'python') {
       return 'python';
+    }
+    if (normalized === 'power bi' || normalized === 'power_bi' || normalized === 'powerbi') {
+      return 'power_bi';
     }
     if (normalized === 'sql') {
       return 'sql';
@@ -3187,7 +3195,7 @@ export class InterviewPrepService {
       caseStudy.sample_data ||
       caseStudy.dataset_creation_sql
     ) {
-      const datasetDef = {
+      const datasetDefs = this.buildDatasetsFromSqlCreation({
         name: caseStudy.title || `Dataset for ${subject}`,
         description:
           caseStudy.dataset_overview ||
@@ -3207,29 +3215,34 @@ export class InterviewPrepService {
           caseStudy.data_creation_python || caseStudy.sample_data,
         csv_data: caseStudy.sample_data,
         record_count: caseStudy.dataset_rows?.length,
-      };
-      const createdDatasetId = await this.createDatasetRecord(
-        exerciseId,
-        subject,
-        datasetDef,
-        result,
-      );
-      if (createdDatasetId) {
-        datasetId = createdDatasetId;
-      }
-    }
-
-    if (Array.isArray(caseStudy.datasets)) {
-      for (const datasetDef of caseStudy.datasets) {
-        const createdId = await this.createDatasetRecord(
+      });
+      for (const datasetDef of datasetDefs) {
+        const createdDatasetId = await this.createDatasetRecord(
           exerciseId,
           subject,
           datasetDef,
           result,
         );
-        if (createdId) {
-          if (!datasetId) {
-            datasetId = createdId;
+        if (createdDatasetId && !datasetId) {
+          datasetId = createdDatasetId;
+        }
+      }
+    }
+
+    if (Array.isArray(caseStudy.datasets)) {
+      for (const datasetDef of caseStudy.datasets) {
+        const datasetDefs = this.buildDatasetsFromSqlCreation(datasetDef);
+        for (const expandedDatasetDef of datasetDefs) {
+          const createdId = await this.createDatasetRecord(
+            exerciseId,
+            subject,
+            expandedDatasetDef,
+            result,
+          );
+          if (createdId) {
+            if (!datasetId) {
+              datasetId = createdId;
+            }
           }
         }
       }
@@ -3568,6 +3581,141 @@ export class InterviewPrepService {
     }
 
     return [];
+  }
+
+  private splitSqlValuesTuple(tuple: string): string[] {
+    const values: string[] = [];
+    let current = '';
+    let inQuotes = false;
+
+    for (let i = 0; i < tuple.length; i += 1) {
+      const char = tuple[i];
+      const nextChar = tuple[i + 1];
+
+      if (char === "'") {
+        current += char;
+        if (inQuotes && nextChar === "'") {
+          current += nextChar;
+          i += 1;
+          continue;
+        }
+        inQuotes = !inQuotes;
+        continue;
+      }
+
+      if (char === ',' && !inQuotes) {
+        values.push(current.trim());
+        current = '';
+        continue;
+      }
+
+      current += char;
+    }
+
+    if (current.trim().length > 0) {
+      values.push(current.trim());
+    }
+
+    return values;
+  }
+
+  private normalizeSqlLiteral(value: string): string {
+    const trimmed = value.trim();
+    if (!trimmed || /^null$/i.test(trimmed)) {
+      return '';
+    }
+
+    if (
+      trimmed.length >= 2 &&
+      trimmed.startsWith("'") &&
+      trimmed.endsWith("'")
+    ) {
+      return trimmed.slice(1, -1).replace(/''/g, "'");
+    }
+
+    return trimmed;
+  }
+
+  private buildCsvFromSqlRows(columns: string[], rows: string[][]): string {
+    if (columns.length === 0 || rows.length === 0) {
+      return '';
+    }
+
+    const escapeCell = (value: string) => {
+      if (/[",\n]/.test(value)) {
+        return `"${value.replace(/"/g, '""')}"`;
+      }
+      return value;
+    };
+
+    const csvRows = [
+      columns.map((column) => escapeCell(column)).join(','),
+      ...rows.map((row) =>
+        columns
+          .map((_, idx) => escapeCell(this.normalizeSqlLiteral(row[idx] ?? '')))
+          .join(','),
+      ),
+    ];
+
+    return csvRows.join('\n');
+  }
+
+  private buildDatasetsFromSqlCreation(
+    datasetInput: {
+      name?: string;
+      description?: string;
+      table_name?: string;
+      columns?: string[];
+      schema_info?: any;
+      creation_sql?: string;
+      creation_python?: string;
+      csv_data?: string;
+      record_count?: number;
+      subject_type?: string;
+      sample_data?: string;
+    },
+  ) {
+    const creationSql = datasetInput.creation_sql || datasetInput.sample_data || '';
+    if (typeof creationSql !== 'string' || !/CREATE\s+TABLE/i.test(creationSql)) {
+      return [datasetInput];
+    }
+
+    const createTableRegex =
+      /CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?["'`]?([\w$]+)["'`]?\s*\(([\s\S]*?)\);/gim;
+    const matches = Array.from(creationSql.matchAll(createTableRegex));
+
+    if (matches.length <= 1) {
+      return [datasetInput];
+    }
+
+    return matches.map((match) => {
+      const tableName = match[1] || datasetInput.table_name || datasetInput.name || 'dataset';
+      const schemaSql = match[0] || '';
+      const columns = this.extractColumnsFromSchema(schemaSql);
+      const insertRegex = new RegExp(
+        `INSERT\\s+INTO\\s+["'\`]?${tableName}["'\`]?\\s+VALUES\\s*([\\s\\S]*?);`,
+        'im',
+      );
+      const insertMatch = creationSql.match(insertRegex);
+      const tuples = insertMatch?.[1]?.match(/\(([\s\S]*?)\)/g) || [];
+      const rows = tuples.map((tuple) =>
+        this.splitSqlValuesTuple(tuple.slice(1, -1)),
+      );
+      const csvData = this.buildCsvFromSqlRows(columns, rows);
+
+      return {
+        ...datasetInput,
+        name: tableName,
+        table_name: tableName,
+        columns,
+        schema_info: columns.length > 0 ? { columns } : datasetInput.schema_info,
+        creation_sql: [schemaSql, insertMatch?.[0] || '']
+          .filter((part) => part && part.trim().length > 0)
+          .join('\n\n'),
+        csv_data: csvData || datasetInput.csv_data,
+        record_count: rows.length || datasetInput.record_count,
+      };
+    });
   }
 
   private getQuestionTypeFromSubject(subject: string): string {

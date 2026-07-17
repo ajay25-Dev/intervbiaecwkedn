@@ -387,6 +387,10 @@ export class PracticeExercisesGenerationService {
       return 'python';
     }
 
+    if (type === 'power_bi' || type === 'power bi' || type === 'powerbi') {
+      return 'power_bi';
+    }
+
     if (type === 'sql') {
       return 'sql';
     }
