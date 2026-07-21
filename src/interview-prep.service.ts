@@ -622,14 +622,18 @@ export class InterviewPrepService {
       overrides.learnerLevel,
       profileData.experience_level,
     );
-    // Dynamically resolve topic + topic_hierarchy via GPT based on actual JD experience
-    const topicInfo = await this.resolveDynamicTopicInfo(
-      subject,
-      learnerDifficulty,
-      jdData,
-      profileData,
-    );
+    const normalizedSubjectKey = this.normalizeSubjectKey(subject);
     const isProblemSolving = this.isProblemSolvingSubject(subject);
+    // Dynamically resolve topic + topic_hierarchy via GPT based on actual JD experience
+    const topicInfo =
+      isProblemSolving || normalizedSubjectKey === 'domain knowledge'
+        ? { topic: subject, topicHierarchy: '' }
+        : await this.resolveDynamicTopicInfo(
+            subject,
+            learnerDifficulty,
+            jdData,
+            profileData,
+          );
     const timeoutMs = this.getSubjectPrepTimeoutMs(subject, 220000);
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
@@ -674,7 +678,7 @@ export class InterviewPrepService {
         ] as const;
       }
 
-      if (this.normalizeSubjectKey(subject) === 'domain knowledge') {
+      if (normalizedSubjectKey === 'domain knowledge') {
         const domainCompanyName =
           profileData?.company_name?.trim() ||
           jdData?.job_description?.company_name?.trim() ||
@@ -1198,6 +1202,73 @@ export class InterviewPrepService {
       const savedPlan = planData?.[0];
       if (savedPlan) {
         try {
+          const domainKnowledgeSubject = orderedSubjects.find((subject) =>
+            this.isDomainKnowledgeSubject(subject),
+          );
+
+          if (domainKnowledgeSubject) {
+            const generatedDomainKnowledge =
+              await this.generateSingleSubjectPrep(
+                domainKnowledgeSubject,
+                {
+                  ...profileData,
+                },
+                {
+                  ...jdData,
+                },
+                {
+                  learnerLevel: undefined,
+                  questionCount: resolvedQuestionCount,
+                  domainKnowledgeDetail: 'summary',
+                },
+              );
+
+            if (generatedDomainKnowledge) {
+              const readyDomainSubjectData = {
+                ...generatedDomainKnowledge[1],
+                subject: generatedDomainKnowledge[0],
+                generation_status: 'ready',
+                generation_mode: 'domain_background',
+                generation_updated_at: new Date().toISOString(),
+              };
+              subjectPrepMap.set(
+                generatedDomainKnowledge[0],
+                readyDomainSubjectData,
+              );
+              await this.upsertPlanSubjectPrep(userId, savedPlan.id, {
+                [generatedDomainKnowledge[0]]: readyDomainSubjectData,
+              });
+              savedPlan.plan_content = {
+                ...(savedPlan.plan_content || {}),
+                subject_prep: {
+                  ...((savedPlan.plan_content?.subject_prep as Record<
+                    string,
+                    Record<string, unknown>
+                  >) || {}),
+                  [generatedDomainKnowledge[0]]: readyDomainSubjectData,
+                },
+              };
+              const domainKnowledgeText = readyDomainSubjectData[
+                'domain_knowledge_text'
+              ];
+              if (typeof domainKnowledgeText === 'string') {
+                savedPlan.domain_knowledge_text = domainKnowledgeText;
+              }
+            } else {
+              await this.setPlanSubjectPrepStatus(
+                userId,
+                savedPlan.id,
+                domainKnowledgeSubject,
+                'failed',
+                {
+                  generation_error:
+                    'Timed out or failed during initial domain generation',
+                  generation_mode: 'domain_background',
+                },
+              );
+            }
+          }
+
           void this.finalizeGeneratedPlanInBackground(
             userId,
             profileData,
@@ -1268,6 +1339,12 @@ export class InterviewPrepService {
       const domainKnowledgeSubject = subjects.find((subject) =>
         this.isDomainKnowledgeSubject(subject),
       );
+      const domainKnowledgeAlreadyReady = Boolean(
+        domainKnowledgeSubject &&
+          String(
+            subjectPrepMap.get(domainKnowledgeSubject)?.generation_status || '',
+          ).toLowerCase() === 'ready',
+      );
       const maxConcurrent = Math.min(4, pendingSubjects.length || 1);
       let nextIndex = 0;
 
@@ -1327,7 +1404,7 @@ export class InterviewPrepService {
         );
       }
 
-      if (domainKnowledgeSubject) {
+      if (domainKnowledgeSubject && !domainKnowledgeAlreadyReady) {
         backgroundWork.push(
           (async () => {
             const subjectStartedAt = Date.now();
